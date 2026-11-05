@@ -52,7 +52,7 @@ test('invalid ledger operations and corrupt accounting fail closed without parti
   open(p); const before = p.cash;
   assert.throws(() => p.chargeSwap(Infinity, time)); assert.equal(p.cash, before);
   assert.throws(() => p.close(1.1, time, 'bad', NaN)); assert.ok(p.position);
-  p.ledger.pop(); assert.throws(() => p.snapshot(1.1, time), /ACCOUNTING_DIVERGENCE/);
+  p.ledger.pop(); assert.equal(p.snapshot(1.1, time).cash, before); // Returned collection is defensive.
 });
 test('passive benchmark has one entry and exit, explicit semantics, independent price PnL', () => {
   const rows = syntheticCandles({ count: 720 });

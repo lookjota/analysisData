@@ -1,3 +1,4 @@
+import { usdProduct } from '../financial/decimal.js';
 import { validateDataset } from '../market-data/historical.js';
 import { executionConfig, executionPrice } from '../execution/prices.js';
 import { VirtualPortfolio } from '../portfolio/virtual.js';
@@ -14,19 +15,19 @@ export function passiveHold(rows, { initialCapital = 1000, costs: options = {}, 
     const c = data.candles[i];
     if (p.position) {
       const nights = Math.floor(Date.parse(c.timestamp) / 86400000) - Math.floor(Date.parse(data.candles[i - 1].timestamp) / 86400000);
-      if (nights) p.chargeSwap(p.position.units * costs.swapPerUnitPerDay * nights, c.timestamp);
+      if (nights) p.chargeSwap(usdProduct(p.position.units, costs.swapPerUnitPerDay, nights), c.timestamp);
     }
     if (i === 1) {
       const entry = executionPrice(c.open, 1, true, costs), units = Math.floor(p.cash / (entry + costs.commissionPerUnit));
       if (units < 1) throw new Error('INSUFFICIENT_BENCHMARK_CAPITAL');
-      p.open({ side: 1, entry, units, stopDistance: null, takeDistance: null, timestamp: c.timestamp, margin: units * entry, commission: units * costs.commissionPerUnit });
+      p.open({ side: 1, entry, units, stopDistance: null, takeDistance: null, timestamp: c.timestamp, margin: usdProduct(units, entry), commission: usdProduct(units, costs.commissionPerUnit) });
       fills.push({ type: 'open', timestamp: c.timestamp, price: entry, units });
     }
     const timestamp = new Date(Date.parse(c.timestamp) + 3600000).toISOString();
     const exit = executionPrice(c.close, 1, false, costs);
     if (i === data.candles.length - 1) {
       const units = p.position.units;
-      p.close(exit, timestamp, 'end-of-data', units * costs.commissionPerUnit);
+      p.close(exit, timestamp, 'end-of-data', usdProduct(units, costs.commissionPerUnit));
       fills.push({ type: 'close', timestamp, price: exit, units });
     }
     equityCurve.push(p.snapshot(exit, timestamp));

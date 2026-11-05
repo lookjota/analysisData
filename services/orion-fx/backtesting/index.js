@@ -27,7 +27,7 @@ export function backtest(rows, { strategy = createStrategy(), initialCapital = 1
   const price = (mid, side, entering) => executionPrice(mid, side, entering, costs);
   const close = (exit, time, reason) => {
     const p = portfolio.position;
-    const trade = portfolio.close(exit, time, reason, usdNumber(usdProduct(p.units, costs.commissionPerUnit)));
+    const trade = portfolio.close(exit, time, reason, usdProduct(p.units, costs.commissionPerUnit));
     fills.push({ timestamp: time, type: 'close', side: p.side, price: exit, units: p.units, ...fillCosts(p.side, exit, p.units, trade.exitCommission), reason });
     return trade;
   };
@@ -41,7 +41,7 @@ export function backtest(rows, { strategy = createStrategy(), initialCapital = 1
     }
     if (portfolio.position && i > 0) {
       const nights = Math.floor(Date.parse(time) / 86400000) - Math.floor(Date.parse(data.candles[i - 1].timestamp) / 86400000);
-      if (nights) portfolio.chargeSwap(usdNumber(usdProduct(portfolio.position.units, costs.swapPerUnitPerDay, nights)), time);
+      if (nights) portfolio.chargeSwap(usdProduct(portfolio.position.units, costs.swapPerUnitPerDay, nights), time);
       const gap = protectiveFill(portfolio.position, c, costs, true, intrabarPolicy);
       if (gap) close(gap.price, time, gap.reason);
     }
@@ -66,7 +66,7 @@ export function backtest(rows, { strategy = createStrategy(), initialCapital = 1
       const decision = assessIntent({ ...pending, entry, equity: state.equity, cash: state.cash, peak, dayStart, killSwitch: halted || daily || margin || blockedDay === day, costPerUnit: 2 * costs.commissionPerUnit + (costs.spreadPips + 2 * costs.slippagePips) * PIP_SIZE }, risk);
       orders.push({ timestamp: time, signalTimestamp: data.candles[i - 1].timestamp, ...pending, ...decision });
       if (decision.allowed) {
-        portfolio.open({ ...pending, ...decision, entry, timestamp: time, commission: usdNumber(usdProduct(decision.units, costs.commissionPerUnit)) });
+        portfolio.open({ ...pending, ...decision, entry, timestamp: time, commission: usdProduct(decision.units, costs.commissionPerUnit) });
         fills.push({ timestamp: time, type: 'open', side: pending.side, units: decision.units, price: entry, ...fillCosts(-pending.side, entry, decision.units, portfolio.position.entryCommission) });
       } else riskEvents.push({ timestamp: time, code: decision.code });
     }
@@ -84,7 +84,7 @@ export function backtest(rows, { strategy = createStrategy(), initialCapital = 1
     equityCurve.push(state);
     if (portfolio.position && trailingDistance !== null) {
       const p = portfolio.position, candidate = price(c.close, p.side, false) - p.side * trailingDistance;
-      if (p.side * (candidate - p.stop) > 0) p.stop = candidate;
+      if (p.side * (candidate - p.stop) > 0) portfolio.updateTrailingStop(candidate);
     }
     // Frozen closed prefix isolates future candles and prevents mutation of canonical data.
     const signal = strategy.signal(Object.freeze(data.candles.slice(0, i + 1)));
