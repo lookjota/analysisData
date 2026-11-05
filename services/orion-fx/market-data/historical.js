@@ -1,3 +1,4 @@
+import { marketSession, CALENDAR_VERSION } from '../calendar/forex.js';
 import { open, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -5,7 +6,12 @@ import { createHash } from 'node:crypto';
 
 export const FIELDS = ['instrument', 'timeframe', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'source', 'synthetic'];
 const HOUR = 3600000;
-const fail = code => { throw new Error(code); };
+const fail = code => {
+  const error = new Error(code);
+  const classification = ({ DUPLICATE_TIMESTAMP: 'DUPLICATE_CANDLE', UNORDERED_TIMESTAMP: 'OUT_OF_ORDER', TIMEZONE_REQUIRED: 'INVALID_TIMESTAMP', INVALID_CLOCK_TIME: 'INVALID_TIMESTAMP', INVALID_TIMESTAMP: 'INVALID_TIMESTAMP', INVALID_CALENDAR_DATE: 'INVALID_TIMESTAMP', H1_ALIGNMENT_REQUIRED: 'INVALID_TIMESTAMP' })[code];
+  if (classification) error.classification = classification;
+  throw error;
+};
 export function timestamp(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) fail('TIMEZONE_REQUIRED');
   if (Number(value.slice(11, 13)) > 23 || Number(value.slice(14, 16)) > 59 || Number(value.slice(17, 19)) > 59) fail('INVALID_CLOCK_TIME');
@@ -40,10 +46,17 @@ function closedHour(ms) {
   const d = new Date(ms), day = d.getUTCDay(), hour = d.getUTCHours();
   return day === 6 || (day === 5 && hour >= 22) || (day === 0 && hour < 22);
 }
-export function validateDataset(rows, { asOf, sort = false, maxRows = 100000 } = {}) {
+export function validateDataset(rows, { asOf, sort = false, maxRows = 100000, calendarMode = 'legacy-utc22', calendar = {}, gapPolicy = 'warn' } = {}) {
+  if (!['legacy-utc22', 'calendar-v1'].includes(calendarMode) || !['warn', 'reject'].includes(gapPolicy)) fail('INVALID_DATASET_OPTIONS');
   if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 100000 || typeof sort !== 'boolean') fail('INVALID_DATASET_OPTIONS');
   if (!Array.isArray(rows) || !rows.length || rows.length > maxRows) fail('INVALID_DATASET_SIZE');
-  const candles = rows.map(normalizeCandle), warnings = [];
+  const candles = rows.map(normalizeCandle), warnings = [], findings = [];
+  const useCalendar = calendarMode === 'calendar-v1';
+  if (useCalendar && calendar !== null) {
+    if (!calendar || typeof calendar !== 'object' || Array.isArray(calendar) || Object.keys(calendar).some(k => !['provider', 'version', 'closures', 'reducedDates', 'weeklyOpenHour', 'weeklyCloseHour', 'weeklyTimezone', 'exceptions'].includes(k))) fail('INVALID_CALENDAR_CONFIG');
+    marketSession(candles[0].timestamp, calendar);
+  }
+  let totalMissing = 0, totalClosed = 0, totalUnknown = 0, gapBudget = 0;
   const cutoff = asOf === undefined ? Infinity : Date.parse(timestamp(asOf));
   if (sort) candles.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   for (let i = 0; i < candles.length; i++) {
@@ -54,16 +67,30 @@ export function validateDataset(rows, { asOf, sort = false, maxRows = 100000 } =
     if (delta === 0) fail('DUPLICATE_TIMESTAMP');
     if (delta < 0) fail('UNORDERED_TIMESTAMP');
     if (delta > HOUR) {
-      let missing = 0, closed = 0;
+      let missing = 0, closed = 0, unknown = 0;
       // No unbounded iteration for malicious multi-century gaps.
       if (delta / HOUR > 24 * 366) fail('GAP_TOO_LARGE');
-      for (let x = previous + HOUR; x < t; x += HOUR) closedHour(x) ? closed++ : missing++;
-      warnings.push({ code: missing ? 'SESSION_GAP' : 'WEEKEND_CLOSURE', timestamp: candles[i].timestamp, missingHours: missing, closedHours: closed });
+      gapBudget += delta / HOUR - 1;
+      if (gapBudget > 100000) fail('CALENDAR_GAP_BUDGET_EXCEEDED');
+      const counts = {};
+      for (let x = previous + HOUR; x < t; x += HOUR) {
+        if (!useCalendar) { closedHour(x) ? closed++ : missing++; continue; }
+        const status = calendar === null ? 'UNKNOWN' : marketSession(new Date(x).toISOString(), calendar).status;
+        const classification = ({ WEEKLY_CLOSED: 'EXPECTED_MARKET_CLOSURE', DECLARED_HOLIDAY: 'DECLARED_HOLIDAY', DECLARED_SCHEDULE_EXCEPTION: 'DECLARED_SCHEDULE_EXCEPTION', UNKNOWN: 'UNKNOWN_GAP' })[status] ?? 'MISSING_DATA';
+        counts[classification] = (counts[classification] ?? 0) + 1;
+        if (classification === 'MISSING_DATA') missing++;
+        else if (classification === 'UNKNOWN_GAP') unknown++;
+        else closed++;
+      }
+      for (const [classification, hours] of Object.entries(counts)) findings.push({ classification, hours, after: candles[i - 1].timestamp, before: candles[i].timestamp });
+      totalMissing += missing; totalClosed += closed; totalUnknown += unknown;
+      if (gapPolicy === 'reject' && (missing || unknown)) fail('DATA_QUALITY_REJECTED');
+      warnings.push({ code: unknown ? 'UNKNOWN_GAP' : missing ? 'SESSION_GAP' : 'WEEKEND_CLOSURE', timestamp: candles[i].timestamp, missingHours: missing, closedHours: closed });
     }
   }
   // Hash canonical values, independent of object key order and CSV formatting.
   const contentHash = createHash('sha256').update(JSON.stringify(candles.map(c => FIELDS.map(k => c[k] ?? null)))).digest('hex');
-  return { schemaVersion: 'orion.candles.v1', candles, warnings, synthetic: candles.some(c => c.synthetic), sorted: sort, contentHash, hashAlgorithm: 'sha256', hashVersion: 'orion.candles.canonical.v1' };
+  return { temporal: { timestampConvention: 'bar-open', closeOffsetMs: HOUR, canonicalTimezone: 'UTC', sourceTimezone: 'UNKNOWN', calendarMode, calendarVersion: useCalendar && calendar !== null ? CALENDAR_VERSION : 'UNKNOWN', provider: useCalendar ? calendar?.provider ?? 'UNKNOWN' : 'UNKNOWN' }, quality: { status: totalMissing || totalUnknown || (useCalendar && calendar === null) ? 'WARNING' : 'PASS', missingHours: totalMissing, closedHours: totalClosed, unknownHours: totalUnknown, findings }, sessionMetadata: useCalendar ? candles.map(c => { const session = calendar === null ? null : marketSession(c.timestamp, calendar); return { openTimestamp: c.timestamp, closeTimestamp: new Date(Date.parse(c.timestamp) + HOUR).toISOString(), timeframe: c.timeframe, expectedSessionState: session?.status ?? 'UNKNOWN', sessionIdentifiers: session?.sessions ?? [], observedDuringClosure: session ? ['WEEKLY_CLOSED', 'DECLARED_HOLIDAY', 'DECLARED_SCHEDULE_EXCEPTION'].includes(session.status) : null }; }) : null, schemaVersion: 'orion.candles.v1', candles, warnings, synthetic: candles.some(c => c.synthetic), sorted: sort, contentHash, hashAlgorithm: 'sha256', hashVersion: 'orion.candles.canonical.v1' };
 }
 function csvLine(line) {
   const cells = []; let cell = '', quoted = false;

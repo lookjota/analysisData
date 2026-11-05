@@ -1,3 +1,4 @@
+import { datasetManifest } from '../market-data/manifest.js';
 import { usdNumber, usdUnits, usdProduct } from '../financial/decimal.js';
 import { marginConfig, assessMargin } from '../financial/margin.js';
 import { validateDataset } from '../market-data/historical.js';
@@ -6,10 +7,11 @@ import { riskConfig, assessIntent } from '../risk/simulation.js';
 import { VirtualPortfolio } from '../portfolio/virtual.js';
 import { executionConfig, executionPrice, protectiveFill, PIP_SIZE } from '../execution/prices.js';
 
-export function backtest(rows, { strategy = createStrategy(), initialCapital = 1000, costs: costOptions = {}, risk: riskOptions = {}, closeAtEnd = true, trailingDistance = null, allowSessionGaps = false, costSchedule = null, intrabarPolicy = 'stop-first', marginModel = null } = {}) {
-  const data = validateDataset(rows);
+export function backtest(rows, { strategy = createStrategy(), initialCapital = 1000, costs: costOptions = {}, risk: riskOptions = {}, closeAtEnd = true, trailingDistance = null, allowSessionGaps = false, costSchedule = null, intrabarPolicy = 'stop-first', marginModel = null, dataValidation = {}, provenance = null } = {}) {
+  const data = validateDataset(rows, dataValidation);
   if (!Number.isFinite(initialCapital) || initialCapital <= 0 || typeof closeAtEnd !== 'boolean' || typeof allowSessionGaps !== 'boolean' || (trailingDistance !== null && (!Number.isFinite(trailingDistance) || trailingDistance <= 0))) throw new Error('INVALID_SIMULATION_CONFIG');
-  if (data.warnings.some(w => w.code === 'SESSION_GAP') && !allowSessionGaps) throw new Error('SESSION_GAP_REQUIRES_ACKNOWLEDGEMENT');
+  if (data.warnings.some(w => ['SESSION_GAP', 'UNKNOWN_GAP'].includes(w.code)) && !allowSessionGaps) throw new Error('SESSION_GAP_REQUIRES_ACKNOWLEDGEMENT');
+  const manifest = provenance === null ? null : datasetManifest(data.candles, { ...provenance, ...dataValidation });
   if (!strategy || typeof strategy.signal !== 'function' || typeof strategy.id !== 'string') throw new Error('INVALID_STRATEGY');
   if (!['stop-first', 'reject-ambiguous'].includes(intrabarPolicy)) throw new Error('INVALID_INTRABAR_POLICY');
   const risk = riskConfig(riskOptions), baseCosts = executionConfig(costOptions), portfolio = new VirtualPortfolio(initialCapital);
@@ -91,5 +93,5 @@ export function backtest(rows, { strategy = createStrategy(), initialCapital = 1
     pending = signal && Object.freeze({ action: signal.action, side: signal.side, stopDistance: signal.stopDistance, takeDistance: signal.takeDistance, exitLong: signal.exitLong, exitShort: signal.exitShort });
     if (!pending || !['hold', 'target'].includes(pending.action) || (pending.action === 'target' && ![1, -1].includes(pending.side))) throw new Error('INVALID_STRATEGY_SIGNAL');
   }
-  return { schemaVersion: 'orion.simulation.v1', simulatorVersion: '3.0.0-phase1', mode: 'backtest', tradingEnabled: false, strategy: { id: strategy.id, version: strategy.version, parameters: strategy.parameters }, config: { initialCapital, accountCurrency: 'USD', accounting: { version: 'usd8-v1', rounding: 'half-away-from-zero', maxScaledInteger: '9007199254740991' }, executionModel: { version: 'mid-h1-v1', signal: 'close-N/open-N+1', ambiguity: intrabarPolicy, liquidity: 'unlimited', spread: schedule ? 'declared-per-candle-schedule' : 'fixed', latency: 'next-open' }, marginModel: marginRules ? { version: 'fixed-entry-margin-v1', ...marginRules } : null, costs: baseCosts, costSchedule: schedule, risk, closeAtEnd, trailingDistance, allowSessionGaps }, dataset: { contentHash: data.contentHash, hashAlgorithm: data.hashAlgorithm, hashVersion: data.hashVersion, instrument: 'EUR/USD', timeframe: 'H1', synthetic: data.synthetic, sources: [...new Set(data.candles.map(c => c.source))], count: rows.length, start: data.candles[0].timestamp, end: data.candles.at(-1).timestamp, warnings: data.warnings }, trades: portfolio.trades, ledger: portfolio.ledger, orders, fills, equityCurve, riskEvents };
+  return { schemaVersion: 'orion.simulation.v1', simulatorVersion: '3.0.0-phase1', mode: 'backtest', tradingEnabled: false, strategy: { id: strategy.id, version: strategy.version, parameters: strategy.parameters }, config: { initialCapital, accountCurrency: 'USD', accounting: { version: 'usd8-v1', rounding: 'half-away-from-zero', maxScaledInteger: '9007199254740991' }, executionModel: { version: 'mid-h1-v1', signal: 'close-N/open-N+1', ambiguity: intrabarPolicy, liquidity: 'unlimited', spread: schedule ? 'declared-per-candle-schedule' : 'fixed', latency: 'next-open' }, marginModel: marginRules ? { version: 'fixed-entry-margin-v1', ...marginRules } : null, costs: baseCosts, costSchedule: schedule, risk, closeAtEnd, trailingDistance, allowSessionGaps }, dataset: { temporal: data.temporal, quality: data.quality, sessionMetadata: data.sessionMetadata, manifest, contentHash: data.contentHash, hashAlgorithm: data.hashAlgorithm, hashVersion: data.hashVersion, instrument: 'EUR/USD', timeframe: 'H1', synthetic: data.synthetic, sources: [...new Set(data.candles.map(c => c.source))], count: rows.length, start: data.candles[0].timestamp, end: data.candles.at(-1).timestamp, warnings: data.warnings }, trades: portfolio.trades, ledger: portfolio.ledger, orders, fills, equityCurve, riskEvents };
 }
