@@ -1,3 +1,4 @@
+import { normalizeQuoteBars } from './prices.js';
 import { marketSession, CALENDAR_VERSION } from '../calendar/forex.js';
 import { open, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -23,7 +24,8 @@ export function timestamp(value) {
   if (probe.toISOString().slice(0, 10) !== calendar) fail('INVALID_CALENDAR_DATE');
   return date.toISOString();
 }
-export function normalizeCandle(raw) {
+export function normalizeCandle(raw, { strict = false } = {}) {
+  if (strict && raw && Object.keys(raw).some(k => ![...FIELDS, "quoteBars"].includes(k))) fail("UNKNOWN_CANDLE_FIELD");
   if (!raw || typeof raw !== 'object') fail('INVALID_CANDLE');
   if (raw.instrument !== 'EUR/USD' || raw.timeframe !== 'H1') fail('UNSUPPORTED_MARKET');
   if (typeof raw.source !== 'string' || !/^[\w .:/-]{1,100}$/.test(raw.source) || typeof raw.synthetic !== 'boolean') fail('PROVENANCE_REQUIRED');
@@ -40,17 +42,18 @@ export function normalizeCandle(raw) {
   }
   // A single bid/ask snapshot has no intrabar semantics: explicitly unsupported.
   if (raw.bid !== undefined || raw.ask !== undefined) fail('BID_ASK_OHLC_NOT_SUPPORTED');
+  if (raw.quoteBars !== undefined) c.quoteBars = normalizeQuoteBars(raw.quoteBars);
   return Object.freeze(c);
 }
 function closedHour(ms) {
   const d = new Date(ms), day = d.getUTCDay(), hour = d.getUTCHours();
   return day === 6 || (day === 5 && hour >= 22) || (day === 0 && hour < 22);
 }
-export function validateDataset(rows, { asOf, sort = false, maxRows = 100000, calendarMode = 'legacy-utc22', calendar = {}, gapPolicy = 'warn' } = {}) {
-  if (!['legacy-utc22', 'calendar-v1'].includes(calendarMode) || !['warn', 'reject'].includes(gapPolicy)) fail('INVALID_DATASET_OPTIONS');
+export function validateDataset(rows, { asOf, sort = false, maxRows = 100000, calendarMode = 'legacy-utc22', calendar = {}, gapPolicy = 'warn', strict = false } = {}) {
+  if (typeof strict !== 'boolean' || !['legacy-utc22', 'calendar-v1'].includes(calendarMode) || !['warn', 'reject'].includes(gapPolicy)) fail('INVALID_DATASET_OPTIONS');
   if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 100000 || typeof sort !== 'boolean') fail('INVALID_DATASET_OPTIONS');
   if (!Array.isArray(rows) || !rows.length || rows.length > maxRows) fail('INVALID_DATASET_SIZE');
-  const candles = rows.map(normalizeCandle), warnings = [], findings = [];
+  const candles = rows.map(c => normalizeCandle(c, { strict })), warnings = [], findings = [];
   const useCalendar = calendarMode === 'calendar-v1';
   if (useCalendar && calendar !== null) {
     if (!calendar || typeof calendar !== 'object' || Array.isArray(calendar) || Object.keys(calendar).some(k => !['provider', 'version', 'closures', 'reducedDates', 'weeklyOpenHour', 'weeklyCloseHour', 'weeklyTimezone', 'exceptions'].includes(k))) fail('INVALID_CALENDAR_CONFIG');
@@ -89,8 +92,8 @@ export function validateDataset(rows, { asOf, sort = false, maxRows = 100000, ca
     }
   }
   // Hash canonical values, independent of object key order and CSV formatting.
-  const contentHash = createHash('sha256').update(JSON.stringify(candles.map(c => FIELDS.map(k => c[k] ?? null)))).digest('hex');
-  return { temporal: { timestampConvention: 'bar-open', closeOffsetMs: HOUR, canonicalTimezone: 'UTC', sourceTimezone: 'UNKNOWN', calendarMode, calendarVersion: useCalendar && calendar !== null ? CALENDAR_VERSION : 'UNKNOWN', provider: useCalendar ? calendar?.provider ?? 'UNKNOWN' : 'UNKNOWN' }, quality: { status: totalMissing || totalUnknown || (useCalendar && calendar === null) ? 'WARNING' : 'PASS', missingHours: totalMissing, closedHours: totalClosed, unknownHours: totalUnknown, findings }, sessionMetadata: useCalendar ? candles.map(c => { const session = calendar === null ? null : marketSession(c.timestamp, calendar); return { openTimestamp: c.timestamp, closeTimestamp: new Date(Date.parse(c.timestamp) + HOUR).toISOString(), timeframe: c.timeframe, expectedSessionState: session?.status ?? 'UNKNOWN', sessionIdentifiers: session?.sessions ?? [], observedDuringClosure: session ? ['WEEKLY_CLOSED', 'DECLARED_HOLIDAY', 'DECLARED_SCHEDULE_EXCEPTION'].includes(session.status) : null }; }) : null, schemaVersion: 'orion.candles.v1', candles, warnings, synthetic: candles.some(c => c.synthetic), sorted: sort, contentHash, hashAlgorithm: 'sha256', hashVersion: 'orion.candles.canonical.v1' };
+  const contentHash = createHash('sha256').update(JSON.stringify(candles.map(c => c.quoteBars ? [...FIELDS.map(k => c[k] ?? null), c.quoteBars] : FIELDS.map(k => c[k] ?? null)))).digest('hex');
+  return { temporal: { timestampConvention: 'bar-open', closeOffsetMs: HOUR, canonicalTimezone: 'UTC', sourceTimezone: 'UNKNOWN', calendarMode, calendarVersion: useCalendar && calendar !== null ? CALENDAR_VERSION : 'UNKNOWN', provider: useCalendar ? calendar?.provider ?? 'UNKNOWN' : 'UNKNOWN' }, quality: { status: totalMissing || totalUnknown || (useCalendar && calendar === null) ? 'WARNING' : 'PASS', missingHours: totalMissing, closedHours: totalClosed, unknownHours: totalUnknown, findings }, sessionMetadata: useCalendar ? candles.map(c => { const session = calendar === null ? null : marketSession(c.timestamp, calendar); return { openTimestamp: c.timestamp, closeTimestamp: new Date(Date.parse(c.timestamp) + HOUR).toISOString(), timeframe: c.timeframe, expectedSessionState: session?.status ?? 'UNKNOWN', sessionIdentifiers: session?.sessions ?? [], observedDuringClosure: session ? ['WEEKLY_CLOSED', 'DECLARED_HOLIDAY', 'DECLARED_SCHEDULE_EXCEPTION'].includes(session.status) : null }; }) : null, schemaVersion: candles.some(c => c.quoteBars) ? 'orion.candles.quotes.v2' : 'orion.candles.v1', candles, warnings, synthetic: candles.some(c => c.synthetic), sorted: sort, contentHash, hashAlgorithm: 'sha256', hashVersion: candles.some(c => c.quoteBars) ? 'orion.candles.canonical.quotes.v2' : 'orion.candles.canonical.v1' };
 }
 function csvLine(line) {
   const cells = []; let cell = '', quoted = false;
@@ -113,6 +116,7 @@ export const csvCell = value => {
   return `"${s.replaceAll('"', '""')}"`;
 };
 export function exportCsv(candles) {
+  if (candles.some(c => c.quoteBars)) throw new Error('QUOTE_BARS_REQUIRE_JSON');
   return [FIELDS.join(','), ...candles.map(c => FIELDS.map(k => csvCell(c[k])).join(','))].join('\n') + '\n';
 }
 export async function importCsv(path, options = {}) {

@@ -5,10 +5,10 @@ export function temporalSplit(length, trainingFraction = .7) {
   if (!boundary || boundary >= length) throw new Error('EMPTY_SPLIT');
   return { train: [0, boundary], test: [boundary, length] };
 }
-export function walkForwardWindows(length, { trainSize, testSize, expanding = false } = {}) {
-  if (![length, trainSize, testSize].every(x => Number.isInteger(x) && x > 0) || typeof expanding !== 'boolean' || trainSize + testSize > length) throw new Error('INVALID_WINDOWS');
+export function walkForwardWindows(length, { trainSize, testSize, expanding = false, validationSize = 0 } = {}) {
+  if (![length, trainSize, testSize].every(x => Number.isInteger(x) && x > 0) || typeof expanding !== 'boolean' || !Number.isSafeInteger(validationSize) || validationSize < 0 || trainSize + validationSize + testSize > length) throw new Error('INVALID_WINDOWS');
   const windows = [];
-  for (let end = trainSize; end + testSize <= length; end += testSize) windows.push({ train: [expanding ? 0 : end - trainSize, end], test: [end, end + testSize] });
+  for (let end = trainSize; end + validationSize + testSize <= length; end += testSize) windows.push({ train: [expanding ? 0 : end - trainSize, end], ...(validationSize ? { validation: [end, end + validationSize] } : {}), test: [end + validationSize, end + validationSize + testSize] });
   return windows;
 }
 

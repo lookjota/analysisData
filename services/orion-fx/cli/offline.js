@@ -60,7 +60,6 @@ export async function runOffline(args, { output, errorOutput }) {
     if (command === 'compare') {
       output(JSON.stringify(strategyIds.map(id => { const r = enrich(backtest(candles, { ...configuration, strategy: createStrategy(id) })); return { strategy: id, synthetic: dataset.synthetic, metrics: { ...r.metrics, drawdownCurve: undefined }, warnings: r.warnings }; }), null, 2)); return 0;
     }
-    if (configuration.strategy === null && (dataValidation.calendarMode !== 'legacy-utc22' || provenance)) throw new Error('PASSIVE_CALENDAR_MANIFEST_PENDING');
     if (command === 'paper:replay' && configuration.strategy === null) throw new Error('PASSIVE_BENCHMARK_REPLAY_UNSUPPORTED');
     const result = configuration.strategy === null ? passiveHold(candles, configuration) : command === 'paper:replay' ? await replay(candles, configuration) : backtest(candles, configuration);
     let report;

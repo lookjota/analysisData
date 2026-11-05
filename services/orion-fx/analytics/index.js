@@ -35,13 +35,19 @@ export function analyze(result, { periodsPerYear = 24 * 252 } = {}) {
 }
 export function robustnessWarnings(result, metrics) {
   const warnings = [];
+  const execution = result.config.executionModel, evaluation = result.config.evaluation;
+  if (execution?.mode === 'ASSUMED_SPREAD') warnings.push('HYPOTHETICAL_SPREAD', 'NO_HISTORICAL_BID_ASK');
+  if (execution?.mode === 'OBSERVED_BID_ASK') warnings.push('AGGREGATED_QUOTES_NOT_TICK_FRESHNESS');
+  if (evaluation && !evaluation.indicatorReady) warnings.push('INSUFFICIENT_WARMUP');
+  if (result.research?.holdoutReused) warnings.push('FINAL_HOLDOUT_REUSED_NOT_INDEPENDENT');
+  if (result.research?.candidateCount > 1) warnings.push('MULTIPLE_PARAMETER_SELECTION_NO_SIGNIFICANCE_CLAIM');
   if (result.strategy.id === 'buy-hold') warnings.push('LEGACY_BUY_HOLD_IS_RISK_MANAGED_HOLD');
   if (result.equityCurve.length < 6048) warnings.push('SHORT_HISTORY_ANNUALIZED_RATIOS_ARE_DESCRIPTIVE');
   if (result.dataset.warnings?.length) warnings.push('IRREGULAR_CALENDAR_ANNUALIZATION_ASSUMPTION');
   if (metrics.totalTrades < 30) warnings.push('FEW_TRADES');
   const gains = result.trades.filter(t => t.netPnl > 0).map(t => t.netPnl);
   if (gains.length && Math.max(...gains) / gains.reduce((s, x) => s + x, 0) > .5) warnings.push('CONCENTRATED_GAINS');
-  if (!result.config.costs.spreadPips || !result.config.costs.slippagePips) warnings.push('ZERO_EXECUTION_COST_ASSUMPTION');
+  if ((execution?.mode !== 'OBSERVED_BID_ASK' && !result.config.costs.spreadPips) || !result.config.costs.slippagePips) warnings.push('ZERO_EXECUTION_COST_ASSUMPTION');
   if (result.dataset.synthetic) warnings.push('SYNTHETIC_DATA_NOT_MARKET_EVIDENCE');
   return warnings;
 }
