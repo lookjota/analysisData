@@ -63,3 +63,8 @@ Thumbs.db
 **/docker-compose.yml.before-*
 **/user_data/strategies/teste.txt
 **/user_data/test-permission.txt
+
+# Orion FX — Credenciais privadas
+/services/orion-fx/.env
+/services/orion-fx/.env.*
+!/services/orion-fx/.env.example
