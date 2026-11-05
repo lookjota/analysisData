@@ -22,6 +22,12 @@ function quantize(coefficient, scale) {
   return units;
 }
 export function usdUnits(value) { const d = decimal(value); return quantize(d.coefficient, d.scale); }
+/** Multiply decimal inputs before rounding, avoiding binary intermediate products. */
+export function usdProduct(...values) {
+  if (!values.length || values.length > 8) throw new Error('INVALID_PRODUCT');
+  const parts = values.map(decimal);
+  return quantize(parts.reduce((p, d) => p * d.coefficient, 1n), parts.reduce((s, d) => s + d.scale, 0));
+}
 export function usdNumber(units) {
   if (units > MAX || units < -MAX) throw new Error('FINANCIAL_OVERFLOW');
   return Number(units) / Number(USD_SCALE);

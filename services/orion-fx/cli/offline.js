@@ -10,9 +10,10 @@ import { replay } from '../paper/replay.js';
 import { enrich, writeReports } from '../reporting/index.js';
 import { sma, ema, rsi, macd, atr, adx, bollinger, stochastic, returns, candleRange, rollingHigh, rollingLow, standardDeviation } from '../indicators/index.js';
 import { assessIntent, riskConfig } from '../risk/simulation.js';
-export const offlineCommands = ['data:validate', 'data:generate', 'indicators', 'backtest', 'compare', 'risk:check', 'paper:replay', 'report'];
+import { datasetManifest, writeManifest } from '../market-data/manifest.js';
+export const offlineCommands = ['data:manifest', 'data:validate', 'data:generate', 'indicators', 'backtest', 'compare', 'risk:check', 'paper:replay', 'report'];
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const flags = new Set(['input', 'strategy', 'count', 'regime', 'spread', 'slippage', 'commission', 'swap', 'capital', 'out', 'allow-gaps']);
+const flags = new Set(['input', 'strategy', 'count', 'regime', 'spread', 'slippage', 'commission', 'swap', 'capital', 'out', 'allow-gaps', 'acquired-at', 'license-status', 'license-reference']);
 const help = command => `${command}: pesquisa offline sem credenciais\nUso: npm start -- ${command} [--input candles.csv] [--strategy ${[...strategyIds, 'passive-hold-benchmark'].join('|')}]\n[--count 720] [--regime mixed|up|down|flat|volatile|quiet|gap|invalid]\n[--capital 1000] [--spread 1] [--slippage 0.1] [--commission 0] [--swap 0]\n[--out nome] [--allow-gaps true|false] [--help]\nSem --input: fixture SINTÉTICA. Custos: spread/slippage em pips; comissão USD/unidade/lado; swap USD/unidade/dia.\n--out cria services/orion-fx/reports/nome (novo); data:generate cria data/samples/nome.csv.\nreport gera novamente o backtest, sem desserializar relatórios externos.`;
 export async function runOffline(args, { output, errorOutput }) {
   const [command, ...rest] = args;
@@ -29,6 +30,16 @@ export async function runOffline(args, { output, errorOutput }) {
     if (options.input && !options.input.endsWith('.csv')) throw new Error('CSV_REQUIRED');
     const dataset = options.input ? await importCsv(resolve(options.input)) : validateDataset(syntheticCandles({ count: Number(options.count ?? 720), regime: options.regime ?? 'mixed' }));
     const candles = dataset.candles;
+    if (command === 'data:manifest') {
+      const manifest = datasetManifest(candles, { acquiredAt: options['acquired-at'], license: { status: options['license-status'] ?? (dataset.synthetic ? 'synthetic' : 'unverified'), reference: options['license-reference'] ?? (dataset.synthetic ? 'local-synthetic-generator' : 'not-verified'), redistributionAllowed: false } });
+      if (options.out) {
+        const directory = resolve(root, 'reports', options.out);
+        await mkdir(resolve(root, 'reports'), { recursive: true });
+        await mkdir(directory, { mode: 0o700 });
+        await writeManifest(resolve(directory, 'dataset-manifest.json'), manifest);
+      }
+      output(JSON.stringify(manifest, null, 2)); return 0;
+    }
     if (command === 'data:validate') { output(JSON.stringify({ ...dataset, candles: undefined, count: candles.length }, null, 2)); return 0; }
     if (command === 'data:generate') {
       if (options.input || !options.out) throw new Error('GENERATE_REQUIRES_OUT_AND_NO_INPUT');

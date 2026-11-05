@@ -171,3 +171,12 @@ suporte, a validação de leitura Demo deve ser uma tarefa separada e autorizada
 A [auditoria dos checkpoints](docs/quant-checkpoints-audit.md) registra a base
 reutilizada, os reforços de histórico/indicadores/backtesting/risco, a validação
 atual (43 casos FX aprovados) e as pendências. Resultados permanecem offline.
+
+Checkpoint incremental V3: [auditoria, alterações, limites e continuidade](docs/quant-v3-checkpoint.md).
+[Triagem pública das fontes](docs/quant-v3-sources.md). Manifesto offline:
+
+```sh
+npm --prefix services/orion-fx start -- data:manifest --count 24 --acquired-at 2026-11-05T00:00:00Z
+```
+
+O comando usa dados sintéticos por padrão; não coleta históricos nem autentica.
