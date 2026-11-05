@@ -1,0 +1,65 @@
+.env
+node_modules/
+*.sqlite
+*.db
+logs/
+.DS_Store
+
+# Credenciais e variáveis de ambiente
+.env
+.env.*
+!.env.example
+!.env.sample
+**/config.json
+**/config-private.json
+**/secrets.json
+
+# Bancos de dados
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# Dados locais do Freqtrade
+**/user_data/data/
+**/user_data/logs/
+**/user_data/backtest_results/
+**/user_data/hyperopt_results/
+**/user_data/migration_backups/
+**/user_data/strategy_backups/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node.js
+node_modules/
+dist/
+build/
+coverage/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Orion: Freqtrade privado
+**/user_data/config*.json
+**/user_data/*secret*.json
+**/user_data/*private*.json
+**/user_data/*.sqlite*
+**/user_data/*.db*
+**/user_data/data/
+**/user_data/logs/
+**/user_data/backtest_results/
+**/user_data/migration_backups/
+**/user_data/strategy_backups/
+
+# Backups e temporários
+**/docker-compose.before-*.yml
+**/docker-compose.yml.bak
+**/docker-compose.yml.before-*
+**/user_data/strategies/teste.txt
+**/user_data/test-permission.txt

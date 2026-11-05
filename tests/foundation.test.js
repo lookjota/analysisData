@@ -1,0 +1,14 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { assertSignal, assertOrderIntent } from '../src/contracts.js';
+import {evaluateOrder} from '../src/risk.js';
+const intent={clientOrderId:'order-1',signalId:'signal-1',symbol:'BTC/USDT',side:'buy',quantity:'0.001',limitPrice:'50000.50'};
+test('valid signal uses UTC',()=>{assert.equal(assertSignal({id:'s1',strategyId:'ema',venue:'freqtrade',symbol:'BTC/USDT',side:'buy',timestamp:'2026-11-05T10:00:00Z'}).id,'s1')});
+test('rejects invalid venue',()=>{assert.throws(()=>assertSignal({id:'s1',strategyId:'ema',venue:'unknown',symbol:'BTC/USDT',side:'buy',timestamp:'2026-11-05T10:00:00Z'}))});
+test('decimal quantities remain strings',()=>assert.equal(assertOrderIntent(intent).quantity,'0.001'));
+test('rejects invalid decimal',()=>assert.throws(()=>assertOrderIntent({...intent,quantity:'0.0'})));
+test('kill switch defaults to engaged',()=>assert.equal(evaluateOrder(intent,{mode:'paper'}).code,'KILL_SWITCH'));
+test('fail closed with stale data',()=>assert.equal(evaluateOrder(intent,{mode:'paper',killSwitch:false}).code,'STALE_DATA'));
+test('valid request cannot execute',()=>assert.equal(evaluateOrder(intent,{mode:'paper',killSwitch:false,marketDataFresh:true}).code,'EXECUTION_DISABLED'));
+test('live configuration forbidden',()=>{const prior=process.env.LIVE_TRADING_ENABLED;process.env.LIVE_TRADING_ENABLED='true';try{assert.equal(evaluateOrder(intent,{mode:'paper'}).code,'UNSAFE_CONFIGURATION')}finally{if(prior===undefined)delete process.env.LIVE_TRADING_ENABLED;else process.env.LIVE_TRADING_ENABLED=prior}});
+test('invalid live mode denied',()=>assert.equal(evaluateOrder(intent,{mode:'live',killSwitch:false,marketDataFresh:true}).allowed,false));

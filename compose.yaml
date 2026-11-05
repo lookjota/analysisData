@@ -1,0 +1,15 @@
+services:
+  orion-foundation:
+    build: .
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      TRADING_MODE: paper
+      LIVE_TRADING_ENABLED: "false"
+      ORDER_EXECUTION_ENABLED: "false"
+    ports:
+      - "127.0.0.1:8787:8787"
+    restart: "no"
