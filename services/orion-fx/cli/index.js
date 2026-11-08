@@ -1,3 +1,4 @@
+import { receiptCommands, runReceipt } from './receipt.js';
 import { forwardCommands, runForward } from './forward.js';
 import { operationCommands, runOperations } from './operations.js';
 import { researchCommands, runResearch } from './research.js';
@@ -16,6 +17,7 @@ export async function run(args = process.argv.slice(2), {
   output = line => console.log(line), errorOutput = line => console.error(line),
 } = {}) {
   const [command = 'status', count] = args;
+  if (receiptCommands.includes(command)) return runReceipt(args, { output, errorOutput });
   if (forwardCommands.includes(command)) return runForward(args, { output, errorOutput });
   if (operationCommands.includes(command)) return runOperations(args, { output, errorOutput });
   if (researchCommands.includes(command)) return runResearch(args, { output, errorOutput });

@@ -43,6 +43,10 @@ export class CapitalDemoBroker {
         method, headers, body: body ? JSON.stringify(body) : undefined,
         redirect: 'error', signal: controller.signal,
       });
+      // Defense in depth for injected transports and unexpected redirect behavior.
+      if (response.redirected || (response.url && new URL(response.url).href !== url.href)) {
+        throw new BrokerError('UNEXPECTED_RESPONSE_ORIGIN');
+      }
       if (!response.ok) {
         if (response.status === 401) this.#tokens = undefined;
         // A rejected login has no session to expire. HTTP 401 alone cannot
