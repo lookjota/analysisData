@@ -1,3 +1,4 @@
+import { sessionCommands, runSessionCommand } from '../optimization/durable-session.js';
 import { compareStrategies, comparisonSummary, comparisonText } from '../optimization/comparison.js';
 import { htmlReport } from '../reporting/index.js';
 import { resolve, join } from 'node:path';
@@ -7,8 +8,9 @@ import { writeExclusive } from '../market-data/historical.js';
 import { assessReadiness } from '../optimization/readiness.js';
 import { createResearchSession, identity } from '../optimization/session.js';
 import { createStrategy } from '../strategies/research.js';
-export const researchCommands = ['research:readiness', 'research:evaluate', 'research:compare'];
+export const researchCommands = ['research:readiness', 'research:evaluate', 'research:compare', ...sessionCommands];
 export async function runResearch([command, ...args], { output, errorOutput }) {
+  if (sessionCommands.includes(command)) return runSessionCommand([command, ...args], { output, errorOutput });
   if (args.length === 1 && args[0] === '--help') {
     if (command === 'research:compare') { output('research:compare --input verified-history.json [--strategies trend,mean-reversion,breakout,ma-cross] [--smoke true|false] [--summary true|false] [--format json|text] [--cost-stress true|false] [--walk-forward rolling|expanding] [--out NEW_DIRECTORY]'); return 0; }
     output(`${command} --input verified-history.json [--strategy trend|mean-reversion|breakout|ma-cross|no-trade] [--smoke true|false] [--out NEW_DIRECTORY]\nOffline simulated research. Evaluates TRAIN and VALIDATION only. No final-holdout access.`); return 0;

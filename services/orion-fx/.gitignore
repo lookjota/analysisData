@@ -19,3 +19,6 @@ data/samples/
 *.sqlite-wal
 *.sqlite-shm
 runtime/
+
+# Durable local research sessions
+research-sessions/
