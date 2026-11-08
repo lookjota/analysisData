@@ -1,3 +1,4 @@
+import { prepareSqlitePath } from '../security/sqlite-path.js';
 import { evidencePath } from '../security/path-policy.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { open, link, unlink, lstat } from 'node:fs/promises';
@@ -143,17 +144,20 @@ export async function saveHistory(path, artifact) {
   return writeAtomicJson(path, artifact);
 }
 
-export async function writeAtomicJson(path, artifact) {
+export async function writeAtomicJson(path, artifact, { checkpoint = async () => {} } = {}) {
   const { directory, target } = await anchoredParent(path);
   const temporary = `${target}.${randomUUID()}.tmp`;
   let file;
   try {
+    await checkpoint('before-create');
     file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     await file.writeFile(JSON.stringify(artifact, null, 2) + '\n');
     await file.sync();
     await file.close();
+    await checkpoint('temporary-synced');
     await link(temporary, target); // Atomic publication; fails if target already exists.
     await directory.sync();
+    await checkpoint('published');
   } finally {
     if (file) { await file.close().catch(() => {}); await unlink(temporary); }
     await directory.close();
@@ -196,19 +200,14 @@ export async function withHistoryPublicationLock(registry, operation) {
   finally { publicationLocks.delete(key); }
 }
 async function publicationLock(registry, operation) {
-  const { directory, target } = await anchoredParent(join(registry, '.publication.sqlite'));
-  let file, db;
+  const guard = prepareSqlitePath(join(registry, '.publication.sqlite'));
+  let db;
   try {
-    file = await open(target, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
-    const stat = await file.stat();
-    if (!stat.isFile() || stat.nlink !== 1) fail('UNSAFE_LOCK_FILE');
-    // Close the creation descriptor before SQLite owns the inode's POSIX locks.
-    await file.close(); file = undefined;
     const { DatabaseSync } = await import('node:sqlite');
-    db = new DatabaseSync(target);
-    // Zero waiting: concurrent publishers fail and can be explicitly retried.
+    db = new DatabaseSync(guard.target);
+    guard.verify();
     db.exec('PRAGMA busy_timeout=0; BEGIN IMMEDIATE;');
-    try { return await operation(); }
+    try { guard.verify(); return await operation(); }
     finally { db.exec('ROLLBACK;'); }
-  } finally { if (db) db.close(); if (file) await file.close(); await directory.close(); }
+  } finally { if (db) db.close(); guard.close(); }
 }

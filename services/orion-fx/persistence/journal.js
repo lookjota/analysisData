@@ -1,5 +1,7 @@
+import { DatabaseSync } from 'node:sqlite';
+import { prepareSqlitePath } from '../security/sqlite-path.js';
 import { createHash } from 'node:crypto';
-import { openSync, closeSync, realpathSync, lstatSync, chmodSync, constants } from 'node:fs';
+import { realpathSync, lstatSync } from 'node:fs';
 import { resolve, dirname, basename, sep } from 'node:path';
 import { VirtualPortfolio } from '../portfolio/virtual.js';
 
@@ -72,23 +74,40 @@ export function projectJournalEvents(events) {
   }
   return portfolio ? { ...portfolio.snapshot(mark, time), ledger: portfolio.ledger, trades: portfolio.trades, riskState: risk, lastMarketMark: mark, sequence: events.length } : null;
 }
+// Share one SQLite connection per pathname in this process. In particular, a
+// second consumer must not preflight-open/close an inode holding POSIX locks.
+const openConnections = new Map();
+function lease(entry) {
+  entry.references++;
+  let closed = false;
+  return Object.freeze(Object.fromEntries(Object.entries(entry.api).map(([name, method])=>[name,
+    name === 'close' ? () => {
+      if (!closed) { closed = true; if (--entry.references === 0) { openConnections.delete(entry.path); entry.api.close(); } }
+    } : function(...args) { if (closed) throw new Error('JOURNAL_CLOSED'); return method.apply(entry.api,args); }
+  ])));
+}
 /** Local SQLite journal. No broker transport. Caller must supply a trusted private directory. */
-export async function openJournal(directory, filename = 'orion.sqlite') {
+export async function openJournal(directory, filename = 'orion.sqlite', { existingOnly = false } = {}) {
   if (basename(filename) !== filename || !/^[a-zA-Z0-9_-]+\.sqlite$/.test(filename)) throw new Error('UNSAFE_PATH');
   const root = resolve(directory);
   if (realpathSync(root) !== root || !lstatSync(root).isDirectory() || root.split(sep).includes('freqtrade')) throw new Error('UNSAFE_DIRECTORY');
   const path = resolve(root, filename);
-  const fd = openSync(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
-  try { if (!lstatSync(path).isFile() || lstatSync(path).nlink !== 1) throw new Error('UNSAFE_FILE'); chmodSync(path, 0o600); } finally { closeSync(fd); }
-  const { DatabaseSync } = await import('node:sqlite');
-  const db = new DatabaseSync(path);
+  const existing = openConnections.get(path);
+  if (existing) { existing.verify(); return lease(existing); }
+  const guard = prepareSqlitePath(path, { existingOnly });
+  let db;
+  try { db = new DatabaseSync(guard.target); guard.verify(); }
+  catch (error) { if (db) db.close(); guard.close(); throw error; }
   try {
-    db.exec('PRAGMA busy_timeout=1000; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');
+    db.exec('PRAGMA busy_timeout=1000;');
     const version = db.prepare('PRAGMA user_version').get().user_version;
     if (version !== 0 && version !== 1) throw new Error('UNSUPPORTED_STORAGE_VERSION');
+    if (version === 0 && db.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all().length) throw new Error('UNRECOGNIZED_DATABASE');
+    db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');
     db.exec('CREATE TABLE IF NOT EXISTS events(session TEXT NOT NULL, sequence INTEGER NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(session,sequence), UNIQUE(session,id)); CREATE TABLE IF NOT EXISTS holdouts(scope TEXT NOT NULL, attempt INTEGER NOT NULL, body TEXT NOT NULL, digest TEXT NOT NULL, status TEXT NOT NULL, result TEXT, PRIMARY KEY(scope,attempt)); PRAGMA user_version=1;');
-  } catch (error) { db.close(); throw error; }
+  } catch (error) { db.close(); guard.close(); throw error; }
   const read = session => {
+    guard.verify();
     if (!id(session)) throw new Error('INVALID_SESSION');
     return db.prepare('SELECT * FROM events WHERE session=? ORDER BY sequence').all(session).map((r,i) => {
       const e = JSON.parse(r.body); validate(e);
@@ -98,12 +117,13 @@ export async function openJournal(directory, filename = 'orion.sqlite') {
   };
   const holdoutDigest = r => hash({ scope: r.scope, attempt: r.attempt, body: r.body, status: r.status, result: r.result });
   const transaction = fn => {
+    guard.verify();
     db.exec('BEGIN IMMEDIATE');
-    try { const result = fn(); db.exec('COMMIT'); return result; }
+    try { const result = fn(); guard.verify(); db.exec('COMMIT'); return result; }
     catch (error) { if (db.isTransaction) db.exec('ROLLBACK'); throw error; }
   };
-  return Object.freeze({
-    close: () => db.close(),
+  const api = Object.freeze({
+    close: () => { try { db.close(); } finally { guard.close(); } },
     recover: session => projectJournalEvents(read(session)),
     events: session => structuredClone(read(session)),
     // Planner executes under the writer lock; financial projection precedes inserts.
@@ -162,4 +182,7 @@ export async function openJournal(directory, filename = 'orion.sqlite') {
       });
     },
   });
+  const entry = { path, api, verify: guard.verify, references: 0 };
+  openConnections.set(path, entry);
+  return lease(entry);
 }

@@ -88,9 +88,9 @@ export function verifyAcquisitionReceipt(receipt) {
   return { receiptHash, ...body.metadata, integrity: 'VERIFIED_LOCAL_CONTENT_ONLY', tradingEnabled: false, brokerExecution: 'DISABLED' };
 }
 
-export async function saveAcquisitionReceipt(path, receipt) {
+export async function saveAcquisitionReceipt(path, receipt, publication = {}) {
   verifyAcquisitionReceipt(receipt);
-  await writeAtomicJson(path, receipt);
+  await writeAtomicJson(path, receipt, publication);
 }
 
 /** No promotion to forward evidence, even if imported today. Journal v1 retains

@@ -50,11 +50,12 @@ export async function openStrategyReplay({ directory, filename = 'strategy.sqlit
       config:initial.config, options:stableOptions, policy, tradingEnabled:false, brokerExecution:'DISABLED'});
   }
   const configurationHash = hash(configuration);
-  const journal = await openJournal(directory,filename);
+  const journal = await openJournal(directory,filename,{existingOnly:!create});
   let lifecycle = 'RECOVERING';
   const envelope = (eventType,payload,eventTimestamp,sequence,eventId) => ({sessionId,eventType,payload,eventTimestamp,sequence,eventId,schemaVersion:1});
   const checkpoints = events => events.filter(e => e.eventType === checkpointType);
   function verify(events) {
+    faultInjector('recovery-verification');
     if (events[0]?.eventType !== 'SESSION_INITIALIZED' || events[1]?.eventType !== 'STRATEGY_DECLARED' || canonical(events[1].payload.configuration) !== canonical(configuration)) throw new Error('STRATEGY_CONFIGURATION_MISMATCH');
     const points = checkpoints(events);
     const financialEvents = events.filter(e => !['SESSION_INITIALIZED','STRATEGY_DECLARED','STRATEGY_RECOVERED',checkpointType].includes(e.eventType));
