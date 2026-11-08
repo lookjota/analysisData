@@ -1,3 +1,4 @@
+import { forwardCommands, runForward } from './forward.js';
 import { operationCommands, runOperations } from './operations.js';
 import { researchCommands, runResearch } from './research.js';
 import { collectionCommands, runCollection } from './collection.js';
@@ -15,6 +16,7 @@ export async function run(args = process.argv.slice(2), {
   output = line => console.log(line), errorOutput = line => console.error(line),
 } = {}) {
   const [command = 'status', count] = args;
+  if (forwardCommands.includes(command)) return runForward(args, { output, errorOutput });
   if (operationCommands.includes(command)) return runOperations(args, { output, errorOutput });
   if (researchCommands.includes(command)) return runResearch(args, { output, errorOutput });
   if (collectionCommands.includes(command)) return runCollection(args, { env, fetchImpl, output, errorOutput });

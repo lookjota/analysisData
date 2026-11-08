@@ -20,6 +20,11 @@ test('V3.4-A four isolated accounts recover and reconcile against uninterrupted 
    assert.equal(BigInt(state.exactUsd8.cash),100000000000n+state.ledger.reduce((sum,e)=>sum+BigInt(e.amountUsd8),0n));
   }
   assert.ok(worker.status().accounts.some(a=>a.snapshot.trades.length>0));
+  const trend=worker.status().accounts[0];
+  assert.equal(trend.snapshot.riskState,'HALTED');
+  assert.equal(trend.latestRiskEvent.payload.reasonCode,'EXPOSURE_LIMIT');
+  assert.equal(trend.latestRiskEvent.payload.riskMetrics.exposure,'100001550272');
+  assert.equal(trend.snapshot.trades[0].netPnlUsd8,'53250068');
   const before=worker.status();worker.run(1);assert.deepEqual(worker.status(),before);
   assert.equal(operationalConfig.risk.dailyLossFraction,.01);assert.equal(operationalConfig.tradingEnabled,false);
   worker.close();reference.close();
