@@ -12,3 +12,10 @@ coverage/
 # Resultados locais e datasets importados
 reports/
 data/samples/
+
+# Local durable journal (never commit runtime state)
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+runtime/

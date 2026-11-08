@@ -32,13 +32,14 @@ function optimizeAuthorized(trainingRows, validationRows, validationStart, candi
     training: training.map(r => ({ metricOrigin: 'TRAIN', metrics: r.metrics })), validation: validation.map(r => ({ metricOrigin: 'VALIDATION', metrics: r.metrics })) };
 }
 /** Logical local guard. Only built-in strategies; no caller optimizer/callback receives rows.
- * In-memory consumption registry: a new session is a new registry, not durable security. */
-export function createResearchSession(rows, { split = {}, config = {} } = {}) {
+ * Optional durable registry reserves access before execution; failures remain reserved. */
+export function createResearchSession(rows, { split = {}, config = {}, registry = null } = {}) {
   const configuration = restrictedConfig(config), dataset = validateDataset(rows, configuration.dataValidation);
   const candles = deepFreeze(dataset.candles), ranges = deepFreeze(researchSplit(candles.length, split));
   const bounds = ([a, b]) => ({ startIndex: a, endIndex: b, count: b - a, start: candles[a].timestamp, endExclusive: new Date(Date.parse(candles[b - 1].timestamp) + 3600000).toISOString() });
   const definition = deepFreeze({ TRAIN: bounds(ranges.train), VALIDATION: bounds(ranges.validation), FINAL_HOLDOUT: bounds(ranges.finalTest) });
   const registrationIdentity = identity({ datasetHash: dataset.contentHash, splitDefinition: definition, configuration, methodologyVersion: 'research-session-v1' });
+  const holdoutScope = { datasetHash: dataset.contentHash, datasetSchema: dataset.hashVersion, splitDefinition: definition, methodology: 'research-session-v1' };
   let selection = null, frozen = null, candidateCount = 0;
   const consumption = [], searchHistory = [];
   let executionAssumptions = null;
@@ -72,14 +73,17 @@ export function createResearchSession(rows, { split = {}, config = {} } = {}) {
       if (!frozen) throw new Error('RESEARCH_NOT_FROZEN');
       if (typeof authorization !== 'string' || !authorization.trim() || authorization.length > 500 || typeof allowReuse !== 'boolean') throw new Error('EXPLICIT_EVALUATION_AUTHORIZATION_REQUIRED');
       if (consumption.length && !allowReuse) throw new Error('FINAL_HOLDOUT_ALREADY_CONSUMED');
-      const holdoutReused = consumption.length > 0;
+      const reservation = registry?.reserveHoldout(holdoutScope, frozen, allowReuse);
+      const holdoutReused = reservation ? reservation.reused : consumption.length > 0;
       const record = { authorization, frozenIdentity: frozen.identity, attempt: consumption.length + 1, holdoutReused, status: 'STARTED' };
       consumption.push(record); // Failed attempts still consume access.
       try {
-        const result = run(selection, ranges.finalTest, 'FINAL_HOLDOUT'); record.status = 'COMPLETED';
-        return enrich({ ...result, research: { ...frozen, evaluationAuthorization: authorization, holdoutReused, holdoutConsumptionCount: consumption.length } });
+        const result = run(selection, ranges.finalTest, 'FINAL_HOLDOUT');
+        if (reservation) registry.consumeHoldout(reservation, identity(result));
+        record.status = 'COMPLETED';
+        return enrich({ ...result, research: { ...frozen, evaluationAuthorization: authorization, holdoutReused, holdoutConsumptionCount: reservation?.attempt ?? consumption.length } });
       } catch (error) { record.status = 'FAILED'; throw error; }
     },
-    status() { return deepFreeze({ registrationIdentity, datasetHash: dataset.contentHash, splitDefinition: definition, frozenIdentity: frozen?.identity ?? null, holdoutConsumptionCount: consumption.length, consumption: structuredClone(consumption) }); },
+    status() { const durable = registry?.holdoutStatus(identity(holdoutScope)); return deepFreeze({ registryMode: registry ? 'DURABLE' : 'VOLATILE', durableHoldoutState: durable ? (durable.length ? durable.at(-1).status : 'UNUSED') : null, durableAttempts: durable ?? null, registrationIdentity, datasetHash: dataset.contentHash, splitDefinition: definition, frozenIdentity: frozen?.identity ?? null, holdoutConsumptionCount: durable?.length ?? consumption.length, consumption: structuredClone(consumption) }); },
   });
 }
