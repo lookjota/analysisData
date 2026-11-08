@@ -1,6 +1,6 @@
 import { priceModel } from '../market-data/prices.js';
 import { datasetManifest } from '../market-data/manifest.js';
-import { usdNumber, usdProduct } from '../financial/decimal.js';
+import { usdNumber, usdProduct, usdUnits } from '../financial/decimal.js';
 import { marginConfig, assessMargin } from '../financial/margin.js';
 import { validateDataset } from '../market-data/historical.js';
 import { createStrategy } from '../strategies/research.js';
@@ -8,7 +8,7 @@ import { riskConfig, assessIntent } from '../risk/simulation.js';
 import { VirtualPortfolio } from '../portfolio/virtual.js';
 import { commissionFor, executionConfig, candleExecutionPrice, protectiveFill, PIP_SIZE } from '../execution/prices.js';
 
-export function backtest(rows, { strategy = createStrategy(), initialCapital = 1000, costs: costOptions = {}, risk: riskOptions = {}, closeAtEnd = true, trailingDistance = null, allowSessionGaps = false, costSchedule = null, intrabarPolicy = 'stop-first', marginModel = null, dataValidation = {}, provenance = null, executionMode, evaluation = null } = {}) {
+export function backtest(rows, { strategy = createStrategy(), initialCapital = 1000, costs: costOptions = {}, risk: riskOptions = {}, closeAtEnd = true, trailingDistance = null, allowSessionGaps = false, costSchedule = null, intrabarPolicy = 'stop-first', marginModel = null, dataValidation = {}, provenance = null, executionMode, evaluation = null } = {}, { durableTrace = false } = {}) {
   const data = validateDataset(rows, dataValidation);
   const model = priceModel(data.candles, executionMode);
   if (model.mode === 'OBSERVED_BID_ASK' && costOptions.spreadPips) throw new Error('OBSERVED_SPREAD_ALREADY_INCLUDED');
@@ -41,16 +41,27 @@ export function backtest(rows, { strategy = createStrategy(), initialCapital = 1
   };
   initialCapital = portfolio.initialCapital;
   const equityCurve = [], riskEvents = [], orders = [], fills = [], decisions = [];
+  const executionTrace = [];
+  let candleEffects = [], persistentRisk = 'ACTIVE';
+  const record = (eventType, payload, eventTimestamp) => { if (durableTrace) candleEffects.push({eventType,payload,eventTimestamp}); };
+  const transition = (next, reasonCode, time, state) => {
+    if (!durableTrace || persistentRisk === 'HALTED' || persistentRisk === next) return;
+    record('REPLAY_RISK_TRANSITION', { previousRiskState:persistentRisk, riskState:next, reasonCode, riskMetrics:{equity:state.exactUsd8.equity,freeMargin:state.exactUsd8.freeMargin,exposure:state.exactUsd8.grossExposure,peak,dayStart}, configurationHash:'0'.repeat(64) },time);
+    persistentRisk = next;
+  };
   let pending = null, peak = initialCapital, dayStart = initialCapital, day = '', halted = false, blockedDay = null;
   const price = (candle, field, side, entering) => candleExecutionPrice(candle, field, side, entering, costs);
   const close = (exit, time, reason) => {
     const p = portfolio.position;
-    const trade = portfolio.close(exit, time, reason, commissionFor(p.units, costs));
+    const fee = commissionFor(p.units, costs);
+    const trade = portfolio.close(exit, time, reason, fee);
+    record('VIRTUAL_POSITION_CLOSED',{exit,reason,commissionUsd8:String(fee)},time);
     fills.push({ timestamp: time, type: 'close', side: p.side, price: exit, units: p.units, ...fillCosts(p.side, exit, p.units, trade.exitCommission, reason), reason, realizedPnl: trade.netPnl, swap: trade.swap, finalCash: portfolio.cash });
     return trade;
   };
   for (let i = evaluationStart; i < evaluationEnd; i++) {
     const c = data.candles[i], time = c.timestamp;
+    candleEffects = [];
     currentCandle = c; fillField = 'open';
     costs = schedule?.[i] ?? baseCosts;
     const currentDay = time.slice(0, 10);
@@ -60,7 +71,7 @@ export function backtest(rows, { strategy = createStrategy(), initialCapital = 1
     }
     if (portfolio.position && i > 0) {
       const nights = Math.floor(Date.parse(time) / 86400000) - Math.floor(Date.parse(data.candles[i - 1].timestamp) / 86400000);
-      if (nights) portfolio.chargeSwap(usdProduct(portfolio.position.units, costs.swapPerUnitPerDay, nights), time);
+      if (nights) { const amount = usdProduct(portfolio.position.units, costs.swapPerUnitPerDay, nights); portfolio.chargeSwap(amount,time); record('VIRTUAL_SWAP_BOOKED',{amountUsd8:String(amount)},time); }
       const gap = protectiveFill(portfolio.position, c, costs, true, intrabarPolicy);
       if (gap) close(gap.price, time, gap.reason);
     }
@@ -71,6 +82,7 @@ export function backtest(rows, { strategy = createStrategy(), initialCapital = 1
     if (drawdown || daily || margin) {
       const code = marginRules && margin ? 'STOP_OUT' : drawdown ? 'DRAWDOWN_LIMIT' : daily ? 'DAILY_LOSS_LIMIT' : 'MARGIN_LIMIT';
       if (portfolio.position) close(price(c, 'open', portfolio.position.side, false), time, code);
+      transition(margin || drawdown ? 'HALTED' : 'PAUSED',code,time,state);
       if (drawdown) halted = true;
       if (daily) blockedDay = day;
       riskEvents.push({ timestamp: time, code });
@@ -82,10 +94,11 @@ export function backtest(rows, { strategy = createStrategy(), initialCapital = 1
     if (pending?.action === 'target' && !portfolio.position) {
       state = portfolio.snapshot(c.open, time);
       const entry = price(c, 'open', pending.side, true);
-      const decision = assessIntent({ ...pending, entry, equity: state.equity, cash: state.cash, peak, dayStart, killSwitch: halted || daily || margin || blockedDay === day, fixedCost: 2 * Math.max(costs.commissionPerOrder, costs.minimumCommission), costPerUnit: 2 * costs.commissionPerUnit + ((c.quoteBars ? (c.quoteBars.ask.open - c.quoteBars.bid.open) / PIP_SIZE : costs.spreadPips) + 2 * costs.slippagePips) * PIP_SIZE }, risk);
+      const decision = assessIntent({ ...pending, entry, equity: state.equity, cash: state.cash, peak, dayStart, killSwitch: halted || daily || margin || blockedDay === day || (durableTrace && persistentRisk !== 'ACTIVE'), fixedCost: 2 * Math.max(costs.commissionPerOrder, costs.minimumCommission), costPerUnit: 2 * costs.commissionPerUnit + ((c.quoteBars ? (c.quoteBars.ask.open - c.quoteBars.bid.open) / PIP_SIZE : costs.spreadPips) + 2 * costs.slippagePips) * PIP_SIZE }, risk);
       orders.push({ timestamp: time, signalTimestamp: data.candles[i - 1].timestamp, signalAvailableAt: new Date(Date.parse(data.candles[i - 1].timestamp) + 3600000).toISOString(), earliestEligibleExecutionTimestamp: time, ...pending, ...decision });
       if (decision.allowed) {
         portfolio.open({ ...pending, ...decision, entry, timestamp: time, commission: commissionFor(decision.units, costs) });
+        record('VIRTUAL_POSITION_OPENED',{side:pending.side,entry,units:decision.units,stopDistance:pending.stopDistance,takeDistance:pending.takeDistance,marginUsd8:String(usdUnits(decision.margin)),commissionUsd8:String(commissionFor(decision.units,costs))},time);
         fills.push({ timestamp: time, type: 'open', signalTimestamp: data.candles[i - 1].timestamp, signalAvailableAt: new Date(Date.parse(data.candles[i - 1].timestamp) + 3600000).toISOString(), earliestEligibleExecutionTimestamp: time, side: pending.side, units: decision.units, price: entry, ...fillCosts(-pending.side, entry, decision.units, portfolio.position.entryCommission) });
       } else riskEvents.push({ timestamp: time, code: decision.code });
     }
@@ -98,19 +111,25 @@ export function backtest(rows, { strategy = createStrategy(), initialCapital = 1
     fillField = 'close';
     if (i === evaluationEnd - 1 && closeAtEnd && portfolio.position) close(price(c, 'close', portfolio.position.side, false), closeTime, 'end-of-data');
     state = portfolio.snapshot(portfolio.position ? price(c, 'close', portfolio.position.side, false) : c.close, closeTime);
+    record('MARKET_MARKED',{price:portfolio.position ? price(c,'close',portfolio.position.side,false) : c.close},closeTime);
     peak = Math.max(peak, state.equity);
     if (state.equity <= peak * (1 - risk.maxDrawdownFraction)) halted = true;
     if (state.equity <= dayStart * (1 - risk.dailyLossFraction)) blockedDay = day;
+    if (durableTrace && (state.freeMargin < 0 || (marginRules && assessMargin(state.equity,state.marginUsed,marginRules).status === 'STOP_OUT'))) transition('HALTED','MARGIN_LIMIT',closeTime,state);
+    if (state.equity <= peak * (1-risk.maxDrawdownFraction)) transition('HALTED','DRAWDOWN_LIMIT',closeTime,state);
+    if (state.equity <= dayStart * (1-risk.dailyLossFraction)) transition('PAUSED','DAILY_LOSS_LIMIT',closeTime,state);
+    if (state.exposure > risk.maxExposure || state.exposure > Math.max(0,state.equity)*risk.leverage) transition('HALTED','EXPOSURE_LIMIT',closeTime,state);
     equityCurve.push(state);
     if (portfolio.position && trailingDistance !== null) {
       const p = portfolio.position, candidate = price(c, 'close', p.side, false) - p.side * trailingDistance;
-      if (p.side * (candidate - p.stop) > 0) portfolio.updateTrailingStop(candidate);
+      if (p.side * (candidate - p.stop) > 0) { portfolio.updateTrailingStop(candidate); record('VIRTUAL_TRAILING_UPDATED',{stop:candidate},closeTime); }
     }
     // Frozen closed prefix isolates future candles and prevents mutation of canonical data.
     const signal = i + 1 < requiredWarmup ? { action: 'hold' } : strategy.signal(Object.freeze(data.candles.slice(0, i + 1)));
     pending = signal && Object.freeze({ action: signal.action, side: signal.side, stopDistance: signal.stopDistance, takeDistance: signal.takeDistance, exitLong: signal.exitLong, exitShort: signal.exitShort });
     decisions.push({ signalTimestamp: time, signalAvailableAt: closeTime, indicatorReady: i + 1 >= requiredWarmup, tradingEligible: i + 1 >= requiredWarmup && i + 1 < evaluationEnd, earliestEligibleExecutionTimestamp: i + 1 < evaluationEnd ? data.candles[i + 1].timestamp : null, signal: pending });
     if (!pending || !['hold', 'target'].includes(pending.action) || (pending.action === 'target' && ![1, -1].includes(pending.side))) throw new Error('INVALID_STRATEGY_SIGNAL');
+    if (durableTrace) executionTrace.push({effects:candleEffects,signal:JSON.parse(JSON.stringify(pending)),snapshot:portfolio.snapshot(portfolio.position ? price(c,'close',portfolio.position.side,false) : c.close,closeTime),riskState:persistentRisk});
   }
-  return { schemaVersion: 'orion.simulation.v1', simulatorVersion: '3.2.0-bc1', mode: 'backtest', tradingEnabled: false, strategy: { id: strategy.id, version: strategy.version, parameters: strategy.parameters }, config: { initialCapital, accountCurrency: 'USD', accounting: { version: 'usd8-v1', rounding: 'half-away-from-zero', maxScaledInteger: '9007199254740991' }, evaluation: { set: evaluation?.set ?? 'EXPLORATORY', contextStart: data.candles[0].timestamp, evaluationStart: data.candles[evaluationStart].timestamp, evaluationEnd: new Date(Date.parse(data.candles[evaluationEnd - 1].timestamp) + 3600000).toISOString(), warmupBars: evaluationStart, indicatorReady: evaluationStart + 1 >= requiredWarmup, tradingEligible: 'evaluated-close-to-next-open', pendingSignalPolicy: 'discard-context-signals', positionPolicy: 'start-flat', capitalPolicy: 'reset' }, executionModel: { ...model, version: 'explicit-h1-v2', signal: 'close-N/open-N+1', ambiguity: intrabarPolicy, liquidity: 'not-modeled-no-capacity-evidence', spread: model.mode === 'OBSERVED_BID_ASK' ? 'observed-per-bar-endpoints' : schedule ? 'declared-per-candle-schedule' : 'fixed', latency: 'next-open' }, marginModel: marginRules ? { version: 'fixed-entry-margin-v1', ...marginRules } : null, costs: baseCosts, costSchedule: schedule, risk, closeAtEnd, trailingDistance, allowSessionGaps }, dataset: { temporal: data.temporal, quality: data.quality, sessionMetadata: data.sessionMetadata, manifest, contentHash: data.contentHash, hashAlgorithm: data.hashAlgorithm, hashVersion: data.hashVersion, instrument: 'EUR/USD', timeframe: 'H1', synthetic: data.synthetic, sources: [...new Set(data.candles.map(c => c.source))], count: rows.length, start: data.candles[evaluationStart].timestamp, end: data.candles[evaluationEnd - 1].timestamp, warnings: data.warnings }, trades: portfolio.trades, ledger: portfolio.ledger, orders, fills, decisions, equityCurve, riskEvents };
+  return { ...(durableTrace ? {executionTrace} : {}), schemaVersion: 'orion.simulation.v1', simulatorVersion: '3.2.0-bc1', mode: 'backtest', tradingEnabled: false, strategy: { id: strategy.id, version: strategy.version, parameters: strategy.parameters }, config: { initialCapital, accountCurrency: 'USD', accounting: { version: 'usd8-v1', rounding: 'half-away-from-zero', maxScaledInteger: '9007199254740991' }, evaluation: { set: evaluation?.set ?? 'EXPLORATORY', contextStart: data.candles[0].timestamp, evaluationStart: data.candles[evaluationStart].timestamp, evaluationEnd: new Date(Date.parse(data.candles[evaluationEnd - 1].timestamp) + 3600000).toISOString(), warmupBars: evaluationStart, indicatorReady: evaluationStart + 1 >= requiredWarmup, tradingEligible: 'evaluated-close-to-next-open', pendingSignalPolicy: 'discard-context-signals', positionPolicy: 'start-flat', capitalPolicy: 'reset' }, executionModel: { ...model, version: 'explicit-h1-v2', signal: 'close-N/open-N+1', ambiguity: intrabarPolicy, liquidity: 'not-modeled-no-capacity-evidence', spread: model.mode === 'OBSERVED_BID_ASK' ? 'observed-per-bar-endpoints' : schedule ? 'declared-per-candle-schedule' : 'fixed', latency: 'next-open' }, marginModel: marginRules ? { version: 'fixed-entry-margin-v1', ...marginRules } : null, costs: baseCosts, costSchedule: schedule, risk, closeAtEnd, trailingDistance, allowSessionGaps }, dataset: { temporal: data.temporal, quality: data.quality, sessionMetadata: data.sessionMetadata, manifest, contentHash: data.contentHash, hashAlgorithm: data.hashAlgorithm, hashVersion: data.hashVersion, instrument: 'EUR/USD', timeframe: 'H1', synthetic: data.synthetic, sources: [...new Set(data.candles.map(c => c.source))], count: rows.length, start: data.candles[evaluationStart].timestamp, end: data.candles[evaluationEnd - 1].timestamp, warnings: data.warnings }, trades: portfolio.trades, ledger: portfolio.ledger, orders, fills, decisions, equityCurve, riskEvents };
 }

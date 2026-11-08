@@ -1,3 +1,4 @@
+import { durableCommands, runDurable } from './durable.js';
 import { resolve, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
@@ -11,12 +12,13 @@ import { enrich, writeReports } from '../reporting/index.js';
 import { sma, ema, rsi, macd, atr, adx, bollinger, stochastic, returns, candleRange, rollingHigh, rollingLow, standardDeviation } from '../indicators/index.js';
 import { assessIntent, riskConfig } from '../risk/simulation.js';
 import { datasetManifest, writeManifest } from '../market-data/manifest.js';
-export const offlineCommands = ['data:manifest', 'data:validate', 'data:generate', 'indicators', 'backtest', 'compare', 'risk:check', 'paper:replay', 'report'];
+export const offlineCommands = [...durableCommands, 'data:manifest', 'data:validate', 'data:generate', 'indicators', 'backtest', 'compare', 'risk:check', 'paper:replay', 'report'];
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const flags = new Set(['input', 'strategy', 'count', 'regime', 'spread', 'slippage', 'commission', 'swap', 'capital', 'out', 'allow-gaps', 'acquired-at', 'license-status', 'license-reference', 'calendar-mode']);
 const help = command => `${command}: pesquisa offline sem credenciais\nUso: npm start -- ${command} [--input candles.csv] [--strategy ${[...strategyIds, 'passive-hold-benchmark'].join('|')}]\n[--count 720] [--regime mixed|up|down|flat|volatile|quiet|gap|invalid]\n[--calendar-mode legacy-utc22|calendar-v1] [--acquired-at ISO] [--capital 1000] [--spread 1] [--slippage 0.1] [--commission 0] [--swap 0]\n[--out nome] [--allow-gaps true|false] [--help]\nSem --input: fixture SINTÉTICA. Custos: spread/slippage em pips; comissão USD/unidade/lado; swap USD/unidade/dia.\n--out cria services/orion-fx/reports/nome (novo); data:generate cria data/samples/nome.csv.\nreport gera novamente o backtest, sem desserializar relatórios externos.`;
 export async function runOffline(args, { output, errorOutput }) {
   const [command, ...rest] = args;
+  if (durableCommands.includes(command)) return runDurable(args,{output,errorOutput});
   if (rest.length === 1 && rest[0] === '--help') { output(help(command)); return 0; }
   try {
     const options = {};

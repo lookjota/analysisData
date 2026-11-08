@@ -25,6 +25,7 @@ const fields = (p, required) => {
   if (!p || Object.getPrototypeOf(p) !== Object.prototype || Object.keys(p).sort().join() !== [...required].sort().join()) throw new Error('INVALID_PAYLOAD_SCHEMA');
 };
 const schemas = {
+  STRATEGY_DECLARED: ['configuration'], STRATEGY_CHECKPOINT: ['index','planHash','pendingIntent'], STRATEGY_RECOVERED: ['count'], VIRTUAL_TRAILING_UPDATED: ['stop'],
   REPLAY_DECLARED: ['configuration'], REPLAY_INPUT: ['input'],
   REPLAY_OUTCOME: ['sourceId','allowed','reasonCode'],
   REPLAY_RISK_TRANSITION: ['previousRiskState','riskState','reasonCode','riskMetrics','configurationHash'],
@@ -47,7 +48,9 @@ export function projectJournalEvents(events) {
     const p = e.payload;
     if (!portfolio && e.eventType !== 'SESSION_INITIALIZED') throw new Error('SESSION_NOT_INITIALIZED');
     switch (e.eventType) {
+      case 'STRATEGY_DECLARED': case 'STRATEGY_CHECKPOINT': case 'STRATEGY_RECOVERED':
       case 'REPLAY_DECLARED': case 'REPLAY_INPUT': case 'REPLAY_OUTCOME': break;
+      case 'VIRTUAL_TRAILING_UPDATED': portfolio.updateTrailingStop(p.stop); break;
       case 'REPLAY_RISK_TRANSITION':
         if (p.previousRiskState !== risk || !['PAUSED','HALTED'].includes(p.riskState) || risk === 'HALTED' || typeof p.reasonCode !== 'string' || !/^[A-Z_]+$/.test(p.reasonCode) || !/^[a-f0-9]{64}$/.test(p.configurationHash)) throw new Error('INVALID_RISK_TRANSITION');
         risk = p.riskState; break;

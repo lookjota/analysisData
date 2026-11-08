@@ -14,3 +14,5 @@ export async function replay(rows, options = {}, { clock = { advanceTo() {} }, o
 
 // Durable explicit-intent API is opt-in; importing the legacy replay opens no storage.
 export { openDurableReplay } from './durable.js';
+
+export { openStrategyReplay } from './strategy-durable.js';
