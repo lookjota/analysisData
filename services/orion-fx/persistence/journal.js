@@ -25,6 +25,9 @@ const fields = (p, required) => {
   if (!p || Object.getPrototypeOf(p) !== Object.prototype || Object.keys(p).sort().join() !== [...required].sort().join()) throw new Error('INVALID_PAYLOAD_SCHEMA');
 };
 const schemas = {
+  REPLAY_DECLARED: ['configuration'], REPLAY_INPUT: ['input'],
+  REPLAY_OUTCOME: ['sourceId','allowed','reasonCode'],
+  REPLAY_RISK_TRANSITION: ['previousRiskState','riskState','reasonCode','riskMetrics','configurationHash'],
   SESSION_INITIALIZED: ['initialCapital'], MARKET_MARKED: ['price'],
   VIRTUAL_POSITION_OPENED: ['side','entry','units','stopDistance','takeDistance','marginUsd8','commissionUsd8'],
   VIRTUAL_POSITION_CLOSED: ['exit','reason','commissionUsd8'], VIRTUAL_SWAP_BOOKED: ['amountUsd8'],
@@ -36,7 +39,7 @@ function validate(e) {
   fields(e.payload, schemas[e.eventType]); canonical(e);
   for (const [k,v] of Object.entries(e.payload)) if (k.endsWith('Usd8') && (typeof v !== 'string' || !/^(0|[1-9][0-9]{0,15})$/.test(v))) throw new Error('INVALID_USD8');
 }
-function project(events) {
+export function projectJournalEvents(events) {
   let portfolio, risk = 'ACTIVE', mark = null, time = null;
   for (const e of events) {
     validate(e);
@@ -44,6 +47,10 @@ function project(events) {
     const p = e.payload;
     if (!portfolio && e.eventType !== 'SESSION_INITIALIZED') throw new Error('SESSION_NOT_INITIALIZED');
     switch (e.eventType) {
+      case 'REPLAY_DECLARED': case 'REPLAY_INPUT': case 'REPLAY_OUTCOME': break;
+      case 'REPLAY_RISK_TRANSITION':
+        if (p.previousRiskState !== risk || !['PAUSED','HALTED'].includes(p.riskState) || risk === 'HALTED' || typeof p.reasonCode !== 'string' || !/^[A-Z_]+$/.test(p.reasonCode) || !/^[a-f0-9]{64}$/.test(p.configurationHash)) throw new Error('INVALID_RISK_TRANSITION');
+        risk = p.riskState; break;
       case 'SESSION_INITIALIZED': if (portfolio) throw new Error('ALREADY_INITIALIZED'); portfolio = new VirtualPortfolio(p.initialCapital); mark = 1; break;
       case 'MARKET_MARKED': portfolio.snapshot(p.price, e.eventTimestamp); mark = p.price; break;
       case 'VIRTUAL_POSITION_OPENED':
@@ -93,14 +100,32 @@ export async function openJournal(directory, filename = 'orion.sqlite') {
   };
   return Object.freeze({
     close: () => db.close(),
-    recover: session => project(read(session)),
+    recover: session => projectJournalEvents(read(session)),
+    events: session => structuredClone(read(session)),
+    // Planner executes under the writer lock; financial projection precedes inserts.
+    // No externally visible candidate state is returned until COMMIT succeeds.
+    appendPlanned(session, planner) {
+      return transaction(() => {
+        const events = read(session);
+        const additions = planner(structuredClone(events), projectJournalEvents(events));
+        if (!Array.isArray(additions)) throw new Error('INVALID_PLAN');
+        additions.forEach((e, i) => {
+          validate(e);
+          if (e.sessionId !== session || e.sequence !== events.length + i + 1 ||
+              [...events, ...additions.slice(0, i)].some(p => p.eventId === e.eventId)) throw new Error('SEQUENCE_CONFLICT');
+        });
+        const snapshot = projectJournalEvents([...events, ...additions]);
+        for (const e of additions) db.prepare('INSERT INTO events VALUES(?,?,?,?,?)').run(session,e.sequence,e.eventId,canonical(e),hash(e));
+        return { idempotent: additions.length === 0, snapshot };
+      });
+    },
     submit(event) {
       const body = canonical(event); const e = JSON.parse(body); validate(e);
       return transaction(() => {
         const events = read(e.sessionId), prior = events.find(x => x.eventId === e.eventId);
-        if (prior) { if (canonical(prior) !== body) throw new Error('EVENT_ID_CONFLICT'); return { idempotent: true, snapshot: project(events) }; }
+        if (prior) { if (canonical(prior) !== body) throw new Error('EVENT_ID_CONFLICT'); return { idempotent: true, snapshot: projectJournalEvents(events) }; }
         if (e.sequence !== events.length + 1) throw new Error('SEQUENCE_CONFLICT');
-        const snapshot = project([...events,e]);
+        const snapshot = projectJournalEvents([...events,e]);
         db.prepare('INSERT INTO events VALUES(?,?,?,?,?)').run(e.sessionId,e.sequence,e.eventId,body,hash(e));
         return { idempotent: false, snapshot };
       });

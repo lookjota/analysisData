@@ -11,3 +11,6 @@ export async function replay(rows, options = {}, { clock = { advanceTo() {} }, o
   }
   return { ...backtest(rows, options), mode: 'paper-replay' };
 }
+
+// Durable explicit-intent API is opt-in; importing the legacy replay opens no storage.
+export { openDurableReplay } from './durable.js';
