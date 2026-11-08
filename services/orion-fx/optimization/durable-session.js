@@ -1,3 +1,4 @@
+import { validateSessionSchema } from './session-schema.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, mkdir, lstat, realpath, open, link, unlink } from 'node:fs/promises';
 import { resolve, join, dirname } from 'node:path';
@@ -53,9 +54,32 @@ async function safeDirectory(path) {
   return target;
 }
 function validate(bundle) {
+  validateSessionSchema(bundle);
   if (bundle?.schemaVersion !== schema || bundle.state !== 'COMPLETED' || bundle.manifest?.hashRules !== 'sorted-json-sha256-v1; JSON projection; exact numeric comparison') throw new Error('INVALID_SESSION_SCHEMA');
   if (bundle.sessionId !== `session-${digest(bundle.manifest)}` || bundle.resultHash !== digest(bundle.results) || bundle.bundleHash !== digest({ schemaVersion: bundle.schemaVersion, state: bundle.state, sessionId: bundle.sessionId, manifest: bundle.manifest, resultHash: bundle.resultHash, results: bundle.results })) throw new Error('SESSION_INTEGRITY_FAILURE');
   return bundle;
+}
+/** Read-only inspection: never removes, repairs, publishes or executes artifacts. */
+export async function auditSessionDirectory(directory) {
+  if (directory.split(/[\\/]/).includes('..')) throw new Error('UNSAFE_PATH');
+  const target = resolve(directory);
+  const stat = await lstat(target);
+  if (!stat.isDirectory() || await realpath(target) !== target) throw new Error('UNSAFE_DIRECTORY');
+  const artifacts = [];
+  for (const entry of (await readdir(target, { withFileTypes: true })).sort((a,b) => a.name.localeCompare(b.name))) {
+    let status = 'UNEXPECTED', error;
+    if (entry.isSymbolicLink() || !entry.isFile()) status = 'UNSAFE';
+    else if (entry.name.startsWith('.incomplete-')) status = 'INCOMPLETE_ORPHAN';
+    else if (/^session-[a-f0-9]{64}\.json$/.test(entry.name)) {
+      try {
+        const b = await inspectSession(join(target,entry.name));
+        if (entry.name !== `${b.sessionId}.json`) throw new Error('SESSION_IDENTITY_MISMATCH');
+        status = 'COMPLETE_SELF_HASH_CHECKED';
+      } catch (e) { status = 'INVALID'; error = /^[A-Z_]+$/.test(e.message) ? e.message : 'SESSION_IO_ERROR'; }
+    }
+    artifacts.push({ name: entry.name, status, ...(error ? { error } : {}) });
+  }
+  return { schemaVersion: 'orion.session-audit.v1', readOnly: true, computationalReplay: 'NOT_PERFORMED', artifacts };
 }
 export async function inspectSession(path) { return validate(await readStoredJson(resolve(path))); }
 export async function verifySession(path, input) {
@@ -106,8 +130,16 @@ export async function runSessionCommand([command, ...args], { output, errorOutpu
   try {
     if (args.length === 1 && args[0] === '--help') { output(`${command} --input HISTORY --out PRIVATE_DIRECTORY (create) | --session SESSION --input HISTORY (verify/replay) | --session SESSION (inspect); create supports --cost-stress true|false --walk-forward rolling|expanding --smoke true|false`); return 0; }
     const options = {};
-    for (let i=0;i<args.length;i+=2) { const key=args[i]?.slice(2); if (!args[i].startsWith('--') || !['input','out','session','cost-stress','walk-forward','smoke'].includes(key) || key in options || args[i+1] === undefined) throw new Error('INVALID_ARGUMENTS'); options[key]=args[i+1]; }
+    for (let i=0;i<args.length;i+=2) { const key=args[i]?.slice(2); if (!args[i].startsWith('--') || !['input','out','session','directory','cost-stress','walk-forward','smoke'].includes(key) || key in options || args[i+1] === undefined) throw new Error('INVALID_ARGUMENTS'); options[key]=args[i+1]; }
     const action = command.split(':').at(-1);
+    if (action === 'audit' || action === 'recover') {
+      if (!options.directory || Object.keys(options).some(k => k !== 'directory')) throw new Error('INVALID_ARGUMENTS');
+      const result = await auditSessionDirectory(options.directory);
+      output(JSON.stringify(result,null,2));
+      return result.artifacts.some(a => a.status !== 'COMPLETE_SELF_HASH_CHECKED') ? 2 : 0;
+    }
+    const allowed = action === 'create' ? ['input','out','smoke','cost-stress','walk-forward'] : action === 'inspect' ? ['session'] : ['session','input'];
+    if (Object.keys(options).some(k => !allowed.includes(k))) throw new Error('INVALID_ARGUMENTS');
     if (['smoke','cost-stress'].some(k => options[k] !== undefined && !['true','false'].includes(options[k]))) throw new Error('INVALID_ARGUMENTS');
     if (action !== 'inspect' && !options.input || action !== 'create' && !options.session || action === 'create' && !options.out) throw new Error('INVALID_ARGUMENTS');
     let result;
@@ -118,4 +150,4 @@ export async function runSessionCommand([command, ...args], { output, errorOutpu
     output(JSON.stringify(result,null,2)); return 0;
   } catch(e) { errorOutput(/^[A-Z][A-Z0-9_]+$/.test(e.message) ? e.message : 'SESSION_IO_ERROR'); return 1; }
 }
-export const sessionCommands = ['create','inspect','verify','replay'].map(x => `research:session:${x}`);
+export const sessionCommands = ['create','inspect','verify','replay','audit','recover'].map(x => `research:session:${x}`);
