@@ -203,6 +203,37 @@ export function mergeHistory(artifacts, { requestedPeriod, acquiredAt = new Date
 export async function publishCollection(directory, registry, options = {}) {
   return withHistoryPublicationLock(registry, () => publishLocked(directory, registry, options));
 }
+
+/** Offline registry merge. Read only the explicitly selected parents. */
+export async function publishMergedHistory(registry, parentDatasetIds) {
+  if (!Array.isArray(parentDatasetIds) || parentDatasetIds.length !== 2 || parentDatasetIds.some(id => !/^sha256-[a-f0-9]{64}$/.test(id))) fail('INVALID_PARENT_DATASET');
+  return withHistoryPublicationLock(registry, async () => {
+    const parents = [];
+    for (const id of parentDatasetIds) {
+      const artifact = await readStoredJson(join(registry, `${id}.json`));
+      verifyHistory(artifact);
+      if (artifact.manifest.datasetId !== id) fail('REGISTRY_IDENTITY_MISMATCH');
+      parents.push(artifact);
+    }
+    const artifact = mergeHistory(parents, {
+      parentDatasetIds,
+      acquiredAt: parents.map(a => a.acquisition.acquiredAt).sort().at(-1),
+    });
+    const path = join(registry, `${artifact.manifest.datasetId}.json`);
+    try { await saveHistory(path, artifact); }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const existing = await readStoredJson(path);
+      verifyHistory(existing);
+      if (existing.artifactHash !== artifact.artifactHash) fail('PUBLICATION_IDENTITY_MISMATCH');
+    }
+    await syncHistoryParent(path);
+    return { datasetId: artifact.manifest.datasetId, path, count: artifact.candles.length,
+      coverage: artifact.manifest.coverage, requestedPeriod: artifact.manifest.requestedPeriod,
+      contentHash: artifact.manifest.canonicalContentHash, artifactHash: artifact.artifactHash,
+      parentDatasetIds: artifact.acquisition.registry.parentDatasetIds };
+  });
+}
 async function publishLocked(directory, registry, { parentDatasetIds = [] } = {}) {
   const { config, state: initial } = await load(directory);
   let state = initial;

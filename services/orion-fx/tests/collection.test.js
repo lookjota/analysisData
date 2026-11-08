@@ -299,3 +299,47 @@ test('publication lock is released by actual child-process termination', async t
   child.kill('SIGKILL'); await exit;
   assert.equal((await publishCollection(directory, registry)).count, 6);
 });
+
+test('offline registry CLI merge validates Sep/Oct boundary, preserves parents and is idempotent', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'orion-merge-'));
+  const a = await artifact({ from: '2026-09-30T21:00:00Z', to: '2026-10-01T01:00:00Z' });
+  const b = await artifact({ from: '2026-10-01T00:00:00Z', to: '2026-10-01T03:00:00Z' });
+  const paths = [a, b].map(a => join(root, `${a.manifest.datasetId}.json`));
+  await saveHistory(paths[0], a); await saveHistory(paths[1], b);
+  const before = await Promise.all(paths.map(p => readFile(p, 'utf8')));
+  const lines = [];
+  const args = ['history:merge', '--registry', root, '--left', a.manifest.datasetId, '--right', b.manifest.datasetId];
+  const options = { env: new Proxy({}, { get: () => assert.fail('environment access') }), fetchImpl: () => assert.fail('network forbidden'), output: s => lines.push(JSON.parse(s)), errorOutput: s => assert.fail(s) };
+  assert.equal(await run(args, options), 0);
+  const result = lines[0], bytes = await readFile(result.path, 'utf8');
+  assert.equal(result.count, 6); // One exact overlapping candle is deduplicated.
+  assert.equal(result.coverage.start, '2026-09-30T21:00:00.000Z');
+  assert.equal(result.coverage.end, '2026-10-01T02:00:00.000Z');
+  assert.deepEqual(result.parentDatasetIds, [a.manifest.datasetId, b.manifest.datasetId].sort());
+  assert.equal(await run(args, options), 0);
+  assert.deepEqual(lines[1], result);
+  assert.equal(await readFile(result.path, 'utf8'), bytes);
+  assert.deepEqual(await Promise.all(paths.map(p => readFile(p, 'utf8'))), before);
+});
+
+test('registry merge rejects boundary gaps, conflicts, incompatible contracts and tampering before publication', async () => {
+  const { publishMergedHistory } = await import('../market-data/collection.js');
+  const a = await artifact({ from: '2026-09-30T21:00:00Z', to: '2026-10-01T00:00:00Z' });
+  const gap = await artifact({ from: '2026-10-01T01:00:00Z', to: '2026-10-01T03:00:00Z' });
+  const incompatible = await artifact({ from: '2026-10-01T00:00:00Z', to: '2026-10-01T03:00:00Z', calendar: { provider: 'different convention' } });
+  const conflict = await artifact({ from: '2026-09-30T23:00:00Z', to: '2026-10-01T03:00:00Z' }, { mutate: d => { d.prices[0].closePrice.bid += .00001; return d; } });
+  for (const [b, pattern] of [[gap, /MISSING_REQUESTED_CANDLE/], [incompatible, /INCOMPATIBLE/], [conflict, /CONFLICTING_OVERLAP/]]) {
+    const root = await mkdtemp(join(tmpdir(), 'orion-merge-reject-'));
+    for (const parent of [a, b]) await saveHistory(join(root, `${parent.manifest.datasetId}.json`), parent);
+    await assert.rejects(publishMergedHistory(root, [a.manifest.datasetId, b.manifest.datasetId]), pattern);
+    assert.equal((await readdir(root)).filter(n => n.endsWith('.json')).length, 2);
+  }
+  for (const tamper of [a => { a.candles[0].close += .01; }, a => { a.manifest.timeframe = 'M1'; }]) {
+    const root = await mkdtemp(join(tmpdir(), 'orion-merge-tamper-'));
+    const bad = structuredClone(a); tamper(bad);
+    await writeFile(join(root, `${a.manifest.datasetId}.json`), JSON.stringify(bad));
+    await saveHistory(join(root, `${gap.manifest.datasetId}.json`), gap);
+    await assert.rejects(publishMergedHistory(root, [a.manifest.datasetId, gap.manifest.datasetId]), /INTEGRITY/);
+    assert.equal((await readdir(root)).filter(n => n.endsWith('.json')).length, 2);
+  }
+});

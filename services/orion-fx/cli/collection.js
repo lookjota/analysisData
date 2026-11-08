@@ -1,7 +1,7 @@
 import { normalizeCandle } from '../market-data/historical.js';
 import { CapitalDemoBroker } from '../brokers/capital-demo.js';
 import { loadConfig } from '../config/index.js';
-import { assertCollectionAccount, createCollection, collectionStatus, resumeCollection, publishCollection, inspectRegistry, mergeHistory } from '../market-data/collection.js';
+import { assertCollectionAccount, createCollection, collectionStatus, resumeCollection, publishCollection, inspectRegistry, mergeHistory, publishMergedHistory } from '../market-data/collection.js';
 import { readStoredJson, saveHistory, verifyHistory, safePath } from '../market-data/capital-history.js';
 import { lstat } from 'node:fs/promises';
 
@@ -11,13 +11,17 @@ const contracts = {
   'history:job:create': { required: ['job', 'from', 'to'], optional: ['window-hours', 'delay-ms', 'retries', 'retry-ms', 'calendar'] },
   'history:job:status': { required: ['job'] }, 'history:job:resume': { required: ['job'] }, 'history:job:verify': { required: ['job'] },
   'history:job:publish': { required: ['job', 'registry'], optional: ['parent'] },
-  'history:merge': { required: ['left', 'right', 'out'], optional: ['parent'] }, 'history:revisions': { required: ['left', 'right'] },
+  'history:merge': { required: ['left', 'right'], optional: ['out', 'registry', 'parent'] }, 'history:revisions': { required: ['left', 'right'] },
 };
 export async function runCollection(args, { env, fetchImpl, output, errorOutput }) {
   let broker, code = 0;
   try {
     const contract = contracts[args[0]], flags = {};
     if (args.length === 2 && args[1] === '--help') {
+      if (args[0] === 'history:merge') {
+        output('history:merge --left DATASET_ID --right DATASET_ID --registry EXISTING_DIRECTORY (offline immutable publication; preserves both parents). Alternatively: --left FILE.json --right FILE.json --out NEW_FILE.json [--parent DATASET_ID]. Both modes verify artifacts, manifests, contracts, overlaps and full calendar continuity.');
+        return 0;
+      }
       output(`${args[0]} ${contract.required.map(k => `--${k} VALUE`).join(' ')} ${(contract.optional ?? []).map(k => `[--${k} VALUE]`).join(' ')}. Only history:job:resume uses network; create requires CAPITAL_EXPECTED_ACCOUNT_ID. UTC H1 boundaries, exclusive end. Defaults: window-hours 168, delay-ms 200, retries 2, retry-ms 1000. Parents are sha256 dataset IDs. Registry must exist. history:inspect --input FILE.json verifies published data offline.`);
       return 0;
     }
@@ -27,6 +31,7 @@ export async function runCollection(args, { env, fetchImpl, output, errorOutput 
       flags[k] = args[i + 1];
     }
     if (contract.required.some(k => !flags[k])) throw new Error('INVALID_ARGUMENTS');
+    if (args[0] === 'history:merge' && ((Boolean(flags.out) === Boolean(flags.registry)) || (flags.registry && flags.parent))) throw new Error('INVALID_ARGUMENTS');
     let result;
     if (args[0] === 'history:job:create') {
       result = await createCollection(flags.job, { from: flags.from, to: flags.to, expectedAccountId: env.CAPITAL_EXPECTED_ACCOUNT_ID, ...(flags.calendar ? { calendar: await readStoredJson(flags.calendar) } : {}),
@@ -47,6 +52,8 @@ export async function runCollection(args, { env, fetchImpl, output, errorOutput 
         await broker.authenticate();
         result = await resumeCollection(flags.job, broker, { expectedAccountId: env.CAPITAL_EXPECTED_ACCOUNT_ID });
       }
+    } else if (args[0] === 'history:merge' && flags.registry) {
+      result = await publishMergedHistory(flags.registry, [flags.left, flags.right]);
     } else {
       const left = await readStoredJson(flags.left), right = await readStoredJson(flags.right);
       verifyHistory(left); verifyHistory(right);
