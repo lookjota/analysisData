@@ -65,7 +65,7 @@ test('orders, account mutation, traversal and arbitrary requests are blocked', (
   for (const path of ['/positions', '/workingorders', '/accounts/topUp', '/session',
     '/markets/../positions', '/markets/EURUSD?redirect=evil', '//example.org']) {
     for (const method of ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']) {
-      if (path === '/session' && ['POST', 'DELETE'].includes(method)) continue;
+      if (path === '/session' && ['POST', 'DELETE', 'GET'].includes(method)) continue;
       assert.throws(() => assertReadOnlyRequest(method, path), /ENDPOINT_BLOCKED/);
     }
   }

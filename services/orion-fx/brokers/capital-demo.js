@@ -1,4 +1,5 @@
 import { loadConfig, DEMO_URL } from '../config/index.js';
+import { timestamp } from '../market-data/historical.js';
 import { assertReadOnlyRequest } from '../risk/index.js';
 
 export class BrokerError extends Error {
@@ -60,8 +61,17 @@ export class CapitalDemoBroker {
         return;
       }
       if (method === 'DELETE') return;
-      try { return await response.json(); }
-      catch { throw new BrokerError(controller.signal.aborted ? 'TIMEOUT' : 'INVALID_RESPONSE'); }
+      try {
+        const data = await response.json();
+        const secrets = [this.#config.CAPITAL_API_KEY, this.#config.CAPITAL_IDENTIFIER,
+          this.#config.CAPITAL_API_PASSWORD, ...Object.values(this.#tokens ?? {})];
+        const unsafe = value => typeof value === 'string' ? secrets.some(secret => secret && value.includes(secret)) :
+          value && typeof value === 'object' ? Object.entries(value).some(([key, child]) =>
+            /^(?:password|api[_-]?key|identifier|cst|(?:x-)?security[_-]?token|authorization)$/i.test(key) || unsafe(key) || unsafe(child)) : false;
+        if (unsafe(data)) throw new BrokerError('UNSAFE_RESPONSE');
+        return data;
+      }
+      catch (error) { if (error instanceof BrokerError) throw error; throw new BrokerError(controller.signal.aborted ? 'TIMEOUT' : 'INVALID_RESPONSE'); }
     } catch (error) {
       if (error instanceof BrokerError) throw error;
       throw new BrokerError(controller.signal.aborted ? 'TIMEOUT' : 'NETWORK_ERROR');
@@ -81,21 +91,39 @@ export class CapitalDemoBroker {
     const data = await this.#request('GET', '/accounts');
     if (!Array.isArray(data?.accounts)) throw new BrokerError('INVALID_RESPONSE');
     return data.accounts.map(account => ({
-      accountId: account.accountId, accountType: account.accountType,
-      currency: account.currency, status: account.status,
+      accountId: account.accountId, accountName: account.accountName,
+      accountType: account.accountType, currency: account.currency,
+      preferred: account.preferred,
     }));
   }
 
-  async findEurUsd() {
+  async findEurUsd({ metadata = false } = {}) {
     const data = await this.#request('GET', '/markets', { query: { searchTerm: 'EUR/USD' } });
     if (!Array.isArray(data?.markets)) throw new BrokerError('INVALID_RESPONSE');
     const normalize = value => typeof value === 'string' ? value.replace(/[/\s]/g, '').toUpperCase() : '';
     const matches = data.markets.filter(market => market.instrumentType === 'CURRENCIES' &&
-      [market.epic, market.symbol, market.instrumentName].some(value => normalize(value) === 'EURUSD'));
+      [market.epic, market.symbol, market.instrumentName].some(value => normalize(value) === 'EURUSD') &&
+      ![market.symbol, market.instrumentName].some(value => /^[A-Z]{6}$/.test(normalize(value)) && normalize(value) !== 'EURUSD'));
     if (matches.length !== 1 || !/^[A-Za-z0-9_-]+$/.test(matches[0].epic)) {
       throw new BrokerError(matches.length > 1 ? 'AMBIGUOUS_INSTRUMENT' : 'INSTRUMENT_NOT_FOUND');
     }
-    return Object.freeze({ epic: matches[0].epic, symbol: 'EUR/USD' });
+    return Object.freeze({ epic: matches[0].epic, symbol: 'EUR/USD', ...(metadata ? { metadata: structuredClone(matches[0]) } : {}) });
+  }
+
+  async verifyContext(expectedAccountId) {
+    const data = await this.#request('GET', '/session');
+    if (typeof expectedAccountId !== 'string' || !expectedAccountId.trim() || data?.accountId !== expectedAccountId) throw new BrokerError('UNEXPECTED_ACCOUNT_CONTEXT');
+    return { verified: true, environment: 'demo' };
+  }
+
+  historicalCandles(epic, { from, to, max = 1000 }) {
+    const start = timestamp(from), end = timestamp(to);
+    if (!from.endsWith('Z') || !to.endsWith('Z') || start > end ||
+        [start, end].some(t => Date.parse(t) % 3600000) ||
+        !Number.isInteger(max) || max < 1 || max > 1000 ||
+        (Date.parse(end) - Date.parse(start)) / 3600000 + 1 > max) throw new BrokerError('INVALID_HISTORICAL_REQUEST');
+    return this.#request('GET', `/prices/${epic}`, { query: { resolution: 'HOUR', max: String(max),
+      from: start.slice(0, 19), to: end.slice(0, 19) } });
   }
 
   market(epic) { return this.#request('GET', `/markets/${epic}`); }

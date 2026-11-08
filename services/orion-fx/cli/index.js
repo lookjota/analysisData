@@ -1,23 +1,25 @@
+import { historyCommands, runHistory } from './history.js';
 import { offlineCommands, runOffline } from './offline.js';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from '../config/index.js';
 import { CapitalDemoBroker, BrokerError } from '../brokers/capital-demo.js';
 import { readQuote, readHourlyCandles } from '../market-data/index.js';
 
-const commands = ['status', 'auth', 'accounts', 'discover', 'quote', 'candles'];
+const commands = ['status', 'auth', 'accounts', 'accounts:list', 'discover', 'quote', 'candles'];
 
 export async function run(args = process.argv.slice(2), {
   env = process.env, fetchImpl = globalThis.fetch,
   output = line => console.log(line), errorOutput = line => console.error(line),
 } = {}) {
   const [command = 'status', count] = args;
+  if (historyCommands.includes(command)) return runHistory(args, { env, fetchImpl, output, errorOutput });
   if (offlineCommands.includes(command)) return runOffline(args, { output, errorOutput });
   if (args.includes('--help')) {
-    output('Uso: status | auth | accounts | discover | quote | candles [1..1000] | ' + offlineCommands.join(' | ') + '; comandos offline: <comando> --help');
+    output('Uso: status | auth | accounts | accounts:list | discover | quote | candles [1..1000] | ' + [...historyCommands, ...offlineCommands].join(' | ') + '; comandos offline: <comando> --help');
     return 0;
   }
   if (!commands.includes(command) || args.length > (command === 'candles' ? 2 : 1)) {
-    errorOutput(`Uso: status | auth | accounts | discover | quote | candles [1..1000]`);
+    errorOutput(`Uso: status | auth | accounts | accounts:list | discover | quote | candles [1..1000]`);
     return 1;
   }
   let broker;
@@ -36,7 +38,7 @@ export async function run(args = process.argv.slice(2), {
     const authenticated = await broker.authenticate();
     let result;
     if (command === 'auth') result = authenticated;
-    else if (command === 'accounts') result = await broker.accounts();
+    else if (command === 'accounts' || command === 'accounts:list') result = await broker.accounts();
     else {
       const instrument = await broker.findEurUsd();
       if (command === 'discover') result = instrument;

@@ -1,8 +1,9 @@
+import { importDataset } from '../market-data/capital-history.js';
 import { durableCommands, runDurable } from './durable.js';
 import { resolve, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
-import { importCsv, validateDataset, exportCsv, writeExclusive } from '../market-data/historical.js';
+import { validateDataset, exportCsv, writeExclusive } from '../market-data/historical.js';
 import { syntheticCandles } from '../data/fixtures/synthetic.js';
 import { createStrategy, strategyIds } from '../strategies/research.js';
 import { backtest } from '../backtesting/index.js';
@@ -15,7 +16,7 @@ import { datasetManifest, writeManifest } from '../market-data/manifest.js';
 export const offlineCommands = [...durableCommands, 'data:manifest', 'data:validate', 'data:generate', 'indicators', 'backtest', 'compare', 'risk:check', 'paper:replay', 'report'];
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const flags = new Set(['input', 'strategy', 'count', 'regime', 'spread', 'slippage', 'commission', 'swap', 'capital', 'out', 'allow-gaps', 'acquired-at', 'license-status', 'license-reference', 'calendar-mode']);
-const help = command => `${command}: pesquisa offline sem credenciais\nUso: npm start -- ${command} [--input candles.csv] [--strategy ${[...strategyIds, 'passive-hold-benchmark'].join('|')}]\n[--count 720] [--regime mixed|up|down|flat|volatile|quiet|gap|invalid]\n[--calendar-mode legacy-utc22|calendar-v1] [--acquired-at ISO] [--capital 1000] [--spread 1] [--slippage 0.1] [--commission 0] [--swap 0]\n[--out nome] [--allow-gaps true|false] [--help]\nSem --input: fixture SINTÉTICA. Custos: spread/slippage em pips; comissão USD/unidade/lado; swap USD/unidade/dia.\n--out cria services/orion-fx/reports/nome (novo); data:generate cria data/samples/nome.csv.\nreport gera novamente o backtest, sem desserializar relatórios externos.`;
+const help = command => `${command}: pesquisa offline sem credenciais\nUso: npm start -- ${command} [--input candles.csv|history.json] [--strategy ${[...strategyIds, 'passive-hold-benchmark'].join('|')}]\n[--count 720] [--regime mixed|up|down|flat|volatile|quiet|gap|invalid]\n[--calendar-mode legacy-utc22|calendar-v1] [--acquired-at ISO] [--capital 1000] [--spread 1] [--slippage 0.1] [--commission 0] [--swap 0]\n[--out nome] [--allow-gaps true|false] [--help]\nSem --input: fixture SINTÉTICA. Custos: spread/slippage em pips; comissão USD/unidade/lado; swap USD/unidade/dia.\n--out cria services/orion-fx/reports/nome (novo); data:generate cria data/samples/nome.csv.\nreport gera novamente o backtest, sem desserializar relatórios externos.`;
 export async function runOffline(args, { output, errorOutput }) {
   const [command, ...rest] = args;
   if (durableCommands.includes(command)) return runDurable(args,{output,errorOutput});
@@ -29,12 +30,13 @@ export async function runOffline(args, { output, errorOutput }) {
     }
     if (options['allow-gaps'] && !['true', 'false'].includes(options['allow-gaps'])) throw new Error('INVALID_ARGUMENTS');
     if (options.out && !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(options.out)) throw new Error('INVALID_OUTPUT_NAME');
-    if (options.input && !options.input.endsWith('.csv')) throw new Error('CSV_REQUIRED');
-    const dataValidation = { calendarMode: options['calendar-mode'] ?? 'legacy-utc22' };
-    const dataset = options.input ? await importCsv(resolve(options.input), dataValidation) : validateDataset(syntheticCandles({ count: Number(options.count ?? 720), regime: options.regime ?? 'mixed' }), dataValidation);
+    if (options.input && !/\.(csv|json)$/.test(options.input)) throw new Error('DATASET_FORMAT_REQUIRED');
+    const dataValidation = options['calendar-mode'] ? { calendarMode: options['calendar-mode'] } : {};
+    const dataset = options.input ? await importDataset(resolve(options.input), dataValidation) : validateDataset(syntheticCandles({ count: Number(options.count ?? 720), regime: options.regime ?? 'mixed' }), dataValidation);
+    if (dataset.manifest) Object.assign(dataValidation, { calendar: dataset.manifest.calendar, ...dataset.manifest.validation, ...dataValidation });
     const candles = dataset.candles;
     if (command === 'data:manifest') {
-      const manifest = datasetManifest(candles, { ...dataValidation, acquiredAt: options['acquired-at'], license: { status: options['license-status'] ?? (dataset.synthetic ? 'synthetic' : 'unverified'), reference: options['license-reference'] ?? (dataset.synthetic ? 'local-synthetic-generator' : 'not-verified'), redistributionAllowed: false } });
+      const manifest = datasetManifest(candles, { ...dataValidation, requestedPeriod: dataset.manifest?.requestedPeriod, rawFileHash: dataset.manifest?.rawFileHash, acquiredAt: options['acquired-at'] ?? dataset.manifest?.acquiredAt, license: { status: options['license-status'] ?? dataset.manifest?.license.status ?? (dataset.synthetic ? 'synthetic' : 'unverified'), reference: options['license-reference'] ?? dataset.manifest?.license.reference ?? (dataset.synthetic ? 'local-synthetic-generator' : 'not-verified'), redistributionAllowed: false } });
       if (options.out) {
         const directory = resolve(root, 'reports', options.out);
         await mkdir(resolve(root, 'reports'), { recursive: true });
@@ -57,8 +59,8 @@ export async function runOffline(args, { output, errorOutput }) {
     if (command === 'risk:check') {
       output(JSON.stringify(assessIntent({ side: 1, entry: candles.at(-1).close, stopDistance: .002, takeDistance: .004, equity: 1000, cash: 1000, peak: 1000, dayStart: 1000 }, riskConfig()), null, 2)); return 0;
     }
-    const provenance = options['acquired-at'] ? { acquiredAt: options['acquired-at'], license: { status: options['license-status'] ?? (dataset.synthetic ? 'synthetic' : 'unverified'), reference: options['license-reference'] ?? 'not-verified', redistributionAllowed: false } } : null;
-    const configuration = { dataValidation, provenance, strategy: options.strategy === 'passive-hold-benchmark' ? null : createStrategy(options.strategy ?? 'trend'), initialCapital: Number(options.capital ?? 1000), costs: { spreadPips: Number(options.spread ?? 1), slippagePips: Number(options.slippage ?? .1), commissionPerUnit: Number(options.commission ?? 0), swapPerUnitPerDay: Number(options.swap ?? 0) }, allowSessionGaps: options['allow-gaps'] === 'true' };
+    const provenance = options['acquired-at'] ? { acquiredAt: options['acquired-at'], license: { status: options['license-status'] ?? dataset.manifest?.license.status ?? (dataset.synthetic ? 'synthetic' : 'unverified'), reference: options['license-reference'] ?? 'not-verified', redistributionAllowed: false } } : dataset.manifest ? { acquiredAt: dataset.manifest.acquiredAt, license: dataset.manifest.license, requestedPeriod: dataset.manifest.requestedPeriod, rawFileHash: dataset.manifest.rawFileHash } : null;
+    const configuration = { dataValidation, provenance, strategy: options.strategy === 'passive-hold-benchmark' ? null : createStrategy(options.strategy ?? 'trend'), initialCapital: Number(options.capital ?? 1000), costs: { spreadPips: Number(options.spread ?? (candles.every(c => c.quoteBars) ? 0 : 1)), slippagePips: Number(options.slippage ?? .1), commissionPerUnit: Number(options.commission ?? 0), swapPerUnitPerDay: Number(options.swap ?? 0) }, allowSessionGaps: options['allow-gaps'] === 'true' };
     if (command === 'compare') {
       output(JSON.stringify(strategyIds.map(id => { const r = enrich(backtest(candles, { ...configuration, strategy: createStrategy(id) })); return { strategy: id, synthetic: dataset.synthetic, metrics: { ...r.metrics, drawdownCurve: undefined }, warnings: r.warnings }; }), null, 2)); return 0;
     }

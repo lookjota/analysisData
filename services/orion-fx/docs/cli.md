@@ -1,5 +1,16 @@
 # CLI offline reproduzível
 
+Para consultar contas Demo com as credenciais do `.env` local do serviço, na raiz:
+
+```bash
+npm --prefix services/orion-fx run demo -- accounts:list
+```
+
+Exige `CAPITAL_ENV=demo` e `TRADING_ENABLED=false` (valores padrão).
+Reutiliza a sessão existente para `GET /api/v1/accounts` e encerra a sessão ao
+final. Exibe somente `accountId`, `accountName`, `accountType`, `currency` e
+`preferred`, sem credenciais ou tokens. Não envia ordens.
+
 Na raiz, Node >=22 e npm, sem instalar dependências:
 
 ```bash
