@@ -3,11 +3,18 @@ import { processAppendableJournal } from './appendable-operations.js';
 import { verifyAcquisitionReceipt } from '../market-data/acquisition-receipt.js';
 import { readStoredJson } from '../market-data/capital-history.js';
 
-const gateNames = ['offlinePersistenceSecurity','journalIntegrity','accountIdentity','cursorLedgerAtomicity',
+const c5Gates = ['sqlitePathnameIntegrity','trustedRuntimeIdentity','walCrashRecovery','prefixVerification','resourceExhaustion','laggardRecovery','modelExecutionAssumptions'];
+const gateNames = [...c5Gates,'offlinePersistenceSecurity','journalIntegrity','accountIdentity','cursorLedgerAtomicity',
   'financialReconciliation','riskEligibility','cursorSynchronization','freshness','sourceAuthenticity',
   'completedCandleSourceVerification','receiptJournalBinding','executionPrice','credentialIsolation','networkIsolation','brokerOrderProhibition'];
 function summarize(gates) {
-  return { gates, failedGates: Object.keys(gates).filter(k=>gates[k]==='FAIL'), unknownGates: Object.keys(gates).filter(k=>gates[k]==='UNKNOWN') };
+  const evidence = Object.fromEntries(Object.keys(gates).map(name=>[name,
+    gates[name]==='UNKNOWN' ? 'Missing prerequisite: deployment-specific or runtime evidence; see docs/quant-v3-4-c5-audit.md' :
+    ['journalIntegrity','prefixVerification'].includes(name) ? 'Complete inspectForwardJournal traversal for current invocation; no cached integrity pass' :
+    ['cursorLedgerAtomicity','financialReconciliation','accountIdentity','cursorSynchronization','riskEligibility'].includes(name) ? 'Verified current account replay and USD8 reconciliation' :
+    name==='brokerOrderProhibition' ? 'Offline model reports tradingEnabled=false; no broker execution path' :
+    'Current local evidence only; see docs/quant-v3-4-c5-audit.md; does not authenticate forward observations']));
+  return { gates, gateEvidence:evidence, failedGates: Object.keys(gates).filter(k=>gates[k]==='FAIL'), unknownGates: Object.keys(gates).filter(k=>gates[k]==='UNKNOWN') };
 }
 export async function assessOpsReadiness({ directory, runId, receipt, clock }) {
   const base = { schemaVersion: 'orion.ops-readiness.v1', tradingEnabled: false, brokerExecution: 'DISABLED', executableQuoteAvailable: false };
@@ -20,6 +27,7 @@ export async function assessOpsReadiness({ directory, runId, receipt, clock }) {
     const active = complete && paper.accounts.every(a=>a.currentRiskState==='ACTIVE');
     const reconciled = financial && active && paper.synchronized;
     const gates = {
+      ...Object.fromEntries(c5Gates.map(name=>[name,'UNKNOWN'])), prefixVerification:'PASS',
       offlinePersistenceSecurity: 'UNKNOWN', journalIntegrity: 'PASS',
       accountIdentity: complete && paper.accounts.every(a=>a.configurationHash) ? 'PASS' : 'UNKNOWN',
       cursorLedgerAtomicity: financial ? 'PASS' : 'UNKNOWN', financialReconciliation: financial ? 'PASS' : 'UNKNOWN',

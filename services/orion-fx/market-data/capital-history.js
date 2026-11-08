@@ -152,15 +152,18 @@ export async function writeAtomicJson(path, artifact, { checkpoint = async () =>
     await checkpoint('before-create');
     file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     await file.writeFile(JSON.stringify(artifact, null, 2) + '\n');
+    await checkpoint('before-file-sync');
     await file.sync();
     await file.close();
     await checkpoint('temporary-synced');
+    await checkpoint('before-publication');
     await link(temporary, target); // Atomic publication; fails if target already exists.
     await directory.sync();
     await checkpoint('published');
   } finally {
-    if (file) { await file.close().catch(() => {}); await unlink(temporary); }
-    await directory.close();
+    try {
+      if (file) { await file.close().catch(() => {}); await checkpoint('before-cleanup'); await unlink(temporary); }
+    } finally { await directory.close(); }
   }
 }
 

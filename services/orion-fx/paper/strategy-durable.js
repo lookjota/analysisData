@@ -11,7 +11,7 @@ const origin = '1970-01-01T00:00:00.000Z';
 const clean = value => JSON.parse(JSON.stringify(value));
 const sameRows = (a,b) => a.length === b.length && a.every((row,i) => canonical(row) === canonical(b[i]));
 /** Bounded offline reference implementation. Reuses backtest and its USD8 ledger. */
-export async function openStrategyReplay({ directory, filename = 'strategy.sqlite', sessionId, rows, options = {}, create = false, appendable = null, faultInjector = () => {} }) {
+export async function openStrategyReplay({ directory, filename = 'strategy.sqlite', sessionId, rows, options = {}, create = false, appendable = null, journalMode = 'DELETE', faultInjector = () => {} }) {
   if (typeof sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) throw new Error('INVALID_SESSION');
   const allowed = ['strategyId','parameters','initialCapital','costs','risk','trailingDistance','intrabarPolicy','marginModel','dataValidation','provenance','executionMode','costSchedule'];
   if (Object.keys(options).some(k => !allowed.includes(k))) throw new Error('INVALID_STRATEGY_REPLAY_OPTIONS');
@@ -19,7 +19,7 @@ export async function openStrategyReplay({ directory, filename = 'strategy.sqlit
   options = JSON.parse(canonical(options));
   let source = null;
   if (appendable) {
-    source = await inspectForwardJournal(directory, appendable.clock);
+    source = await inspectForwardJournal(directory, appendable.clock, {checkpoint:faultInjector});
     if (canonical(options.dataValidation?.calendar ?? null)!==canonical(source.config.calendar)) throw new Error('JOURNAL_CALENDAR_MISMATCH');
     if (source.quarantinedSequences.length) throw new Error('QUARANTINED_REVISION_BLOCKS_PROCESSING');
     if (!sameRows(rows, source.accepted.map(r=>r.candle))) throw new Error('UNVERIFIED_JOURNAL_INPUT');
@@ -50,7 +50,7 @@ export async function openStrategyReplay({ directory, filename = 'strategy.sqlit
       config:initial.config, options:stableOptions, policy, tradingEnabled:false, brokerExecution:'DISABLED'});
   }
   const configurationHash = hash(configuration);
-  const journal = await openJournal(directory,filename,{existingOnly:!create});
+  const journal = await openJournal(directory,filename,{existingOnly:!create,journalMode});
   let lifecycle = 'RECOVERING';
   const envelope = (eventType,payload,eventTimestamp,sequence,eventId) => ({sessionId,eventType,payload,eventTimestamp,sequence,eventId,schemaVersion:1});
   const checkpoints = events => events.filter(e => e.eventType === checkpointType);
@@ -62,9 +62,11 @@ export async function openStrategyReplay({ directory, filename = 'strategy.sqlit
     if (points.length > candles.length) throw new Error('STRATEGY_CHECKPOINT_CONFLICT');
     const result = points.length ? reference(points.length) : null;
     for (let i=0;i<points.length;i++) {
+      if (i === points.length-1) faultInjector('account-prefix-before-final');
       if (source && canonical(points[i].payload.cursor)!==canonical(cursor(i))) throw new Error('CURSOR_COMMITMENT_MISMATCH');
       if (points[i].payload.index !== i || points[i].payload.planHash !== hash(result.executionTrace[i]) || canonical(points[i].payload.pendingIntent) !== canonical(pending(result.executionTrace[i],i))) throw new Error('STRATEGY_CHECKPOINT_CONFLICT');
     }
+    faultInjector('account-prefix-complete');
     if (result) {
       const expectedEffects = result.executionTrace.flatMap(t=>t.effects).map(e=>e.eventType==='REPLAY_RISK_TRANSITION' ? {...e,payload:{...e.payload,configurationHash}} : e);
       if(!sameRows(financialEvents.map(({eventType,payload,eventTimestamp})=>({eventType,payload,eventTimestamp})),expectedEffects)) throw new Error('STRATEGY_TRACE_MISMATCH');

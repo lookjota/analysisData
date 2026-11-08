@@ -87,13 +87,14 @@ function lease(entry) {
   ])));
 }
 /** Local SQLite journal. No broker transport. Caller must supply a trusted private directory. */
-export async function openJournal(directory, filename = 'orion.sqlite', { existingOnly = false } = {}) {
+export async function openJournal(directory, filename = 'orion.sqlite', { existingOnly = false, journalMode = 'DELETE' } = {}) {
+  if (!['DELETE','WAL'].includes(journalMode)) throw new Error('INVALID_JOURNAL_MODE');
   if (basename(filename) !== filename || !/^[a-zA-Z0-9_-]+\.sqlite$/.test(filename)) throw new Error('UNSAFE_PATH');
   const root = resolve(directory);
   if (realpathSync(root) !== root || !lstatSync(root).isDirectory() || root.split(sep).includes('freqtrade')) throw new Error('UNSAFE_DIRECTORY');
   const path = resolve(root, filename);
   const existing = openConnections.get(path);
-  if (existing) { existing.verify(); return lease(existing); }
+  if (existing) { if (existing.journalMode !== journalMode) throw new Error('SQLITE_MODE_CONFLICT'); existing.verify(); return lease(existing); }
   const guard = prepareSqlitePath(path, { existingOnly });
   let db;
   try { db = new DatabaseSync(guard.target); guard.verify(); }
@@ -103,7 +104,8 @@ export async function openJournal(directory, filename = 'orion.sqlite', { existi
     const version = db.prepare('PRAGMA user_version').get().user_version;
     if (version !== 0 && version !== 1) throw new Error('UNSUPPORTED_STORAGE_VERSION');
     if (version === 0 && db.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all().length) throw new Error('UNRECOGNIZED_DATABASE');
-    db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');
+    db.exec(`PRAGMA journal_mode=${journalMode}; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=100; PRAGMA journal_size_limit=1048576;`);
+    if (db.prepare('PRAGMA journal_mode').get().journal_mode.toUpperCase() !== journalMode) throw new Error('SQLITE_MODE_UNAVAILABLE');
     db.exec('CREATE TABLE IF NOT EXISTS events(session TEXT NOT NULL, sequence INTEGER NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(session,sequence), UNIQUE(session,id)); CREATE TABLE IF NOT EXISTS holdouts(scope TEXT NOT NULL, attempt INTEGER NOT NULL, body TEXT NOT NULL, digest TEXT NOT NULL, status TEXT NOT NULL, result TEXT, PRIMARY KEY(scope,attempt)); PRAGMA user_version=1;');
   } catch (error) { db.close(); guard.close(); throw error; }
   const read = session => {
@@ -182,7 +184,7 @@ export async function openJournal(directory, filename = 'orion.sqlite', { existi
       });
     },
   });
-  const entry = { path, api, verify: guard.verify, references: 0 };
+  const entry = { path, journalMode, api, verify: guard.verify, references: 0 };
   openConnections.set(path, entry);
   return lease(entry);
 }

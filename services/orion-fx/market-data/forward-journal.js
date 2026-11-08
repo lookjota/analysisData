@@ -51,7 +51,8 @@ export async function initializeForwardJournal(directory,{finalizationDelayMs=60
   await writeAtomicJson(join(path,'journal.json'),seal({version:'orion.observations.v1',createdAt:timestamp(clock()),calendarVersion:CALENDAR_VERSION,calendar,finalizationDelayMs,maxAgeMs}));
   return inspectForwardJournal(path,clock);
 }
-export async function inspectForwardJournal(directory,clock=()=>new Date().toISOString()) {
+export async function inspectForwardJournal(directory,clock=()=>new Date().toISOString(),{checkpoint=()=>{}}={}) {
+  await checkpoint('prefix-before-start');
   const path=await location(directory), config=await readStoredJson(join(path,'journal.json'));
   unseal(config);
   if(config.version!=='orion.observations.v1'||config.calendarVersion!==CALENDAR_VERSION) fail('JOURNAL_VERSION');
@@ -61,6 +62,7 @@ export async function inspectForwardJournal(directory,clock=()=>new Date().toISO
   for(let i=0;i<names.length;i++) {
     if(names[i]!==name(i+1)) fail('JOURNAL_SEQUENCE_GAP');
     if((await lstat(join(path,names[i]))).size>262144) fail('PAYLOAD_TOO_LARGE');
+    if(i===names.length-1) await checkpoint('prefix-before-final');
     const r=await readStoredJson(join(path,names[i])); unseal(r);
     if(r.sequence!==i+1||r.previous!==previous||r.contentHash!==hash(r.observation.candle)) fail('JOURNAL_CORRUPTION');
     const candle=validateObservation(r.observation,config,r.ingestedAt);
@@ -69,8 +71,10 @@ export async function inspectForwardJournal(directory,clock=()=>new Date().toISO
     if(r.state!==expected || prior?.contentHash===r.contentHash) fail('JOURNAL_CORRUPTION');
     if(prior) revisions.push(r.sequence); else accepted.push({...r,candle});
     records.push(r); previous=r.digest;
+    await checkpoint('prefix-record-verified', {sequence:i+1});
   }
   if(accepted.length) validateDataset(accepted.map(r=>r.candle),{asOf:clock(),calendarMode:'calendar-v1',calendar:config.calendar,gapPolicy:'reject',strict:true,maxRows:1000});
+  await checkpoint('prefix-complete');
   const latest=accepted.at(-1), ageMs=latest ? Date.parse(timestamp(clock()))-Date.parse(latest.observation.observedAt):null;
   return {version:config.version,sequence:records.length,head:previous,integrity:'VERIFIED_LOCAL_HASH_CHAIN',sourceAuthentication:'UNVERIFIED_OFFLINE_DECLARATION',classifications:[...new Set(records.map(r=>r.observation.classification))],quarantinedSequences:revisions,missingStatus:'NO_INTERIOR_OPEN_HOUR_GAPS',inputFreshness:{ageMs,stale:ageMs===null||ageMs>config.maxAgeMs},forwardExecution:'BLOCKED_NO_AUTHENTICATED_RECEIPT_OR_EXECUTABLE_QUOTE',tradingEnabled:false,brokerExecution:'DISABLED',config,records,accepted};
 }
@@ -86,6 +90,7 @@ export async function appendForwardObservations(directory,batch,clock=()=>new Da
       if(state.sequence>=1000) fail('JOURNAL_CAPACITY');
       const prior=state.accepted.find(r=>r.candle.timestamp===candle.timestamp);
       if(!prior && state.accepted.length) validateDataset([...state.accepted.map(r=>r.candle),candle],{asOf:now,calendarMode:'calendar-v1',calendar:state.config.calendar,gapPolicy:'reject',strict:true,maxRows:1000});
+      await publication.checkpoint?.('record-allocation');
       const record=seal({sequence:state.sequence+1,previous:state.head,ingestedAt:now,contentHash,state:prior?'QUARANTINED_REVISION':'ACCEPTED',observation});
       await writeAtomicJson(join(path,name(record.sequence)),record,publication);
       state=await inspectForwardJournal(path,clock);

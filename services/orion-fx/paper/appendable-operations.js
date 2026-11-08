@@ -41,7 +41,7 @@ export async function processAppendableJournal({directory,runId,action='status',
       return {runId,identityVersion:'strategy-appendable-v1',mode:'ENGINEERING_REPLAY',sourceClassifications:journal.classifications,
         executionAssumptions:'MODEL_ONLY historical next-observed-open; no executable quote',tradingEnabled:false,brokerExecution:'DISABLED',
         journalHeadSequence:journal.sequence,journalHeadCommitment:commitments.head,accounts:states,
-        synchronized:states.every(s=>s.status==='SYNCHRONIZED')};
+        synchronized:states.every(s=>s.financialReconciliation==='VERIFIED' && s.consumedSequence===journal.sequence && s.consumedCommitment===commitments.head)};
     } finally {for(const a of accounts)if(!a.blocked)a.close();}
   });
 }

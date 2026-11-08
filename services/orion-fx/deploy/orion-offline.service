@@ -1,0 +1,38 @@
+# EXAMPLE ONLY. Operator provisions identity, clean code and synthetic state first.
+# Never execute directly from a home directory. Do not enable without authorization.
+[Unit]
+Description=Orion offline paper status (opt-in example)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=orion-offline
+Group=orion-offline
+SupplementaryGroups=
+WorkingDirectory=/var/lib/orion-offline
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TRADING_ENABLED=false /usr/bin/node /opt/orion-offline/cli/forward-offline.js paper:ops:journal:paper:status --mode appendable-v1 --journal /var/lib/orion-offline/journal --run approved_run
+UMask=0077
+StateDirectory=orion-offline
+StateDirectoryMode=0700
+RuntimeDirectory=orion-offline
+RuntimeDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/opt/orion-offline
+ReadWritePaths=/var/lib/orion-offline /run/orion-offline
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal
+# No [Install] section: deliberately not enableable by default.
