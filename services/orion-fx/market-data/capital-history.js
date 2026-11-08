@@ -1,3 +1,4 @@
+import { evidencePath } from '../security/path-policy.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { open, link, unlink, lstat } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -112,7 +113,7 @@ export function verifyHistory(artifact, options = {}) {
 
 /** Reject symlinks in every existing component, including input ancestors. */
 export async function safePath(path) {
-  const target = resolve(path), root = parse(target).root;
+  const target = evidencePath(path), root = parse(target).root;
   let current = root;
   const components = target.slice(root.length).split('/');
   for (let i = 0; i < components.length; i++) {
@@ -125,7 +126,7 @@ export async function safePath(path) {
 
 // Linux directory descriptors anchor every lookup against rename/symlink races.
 async function anchoredParent(path) {
-  const target = resolve(path);
+  const target = evidencePath(path);
   let directory = await open('/', constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     for (const component of dirname(target).split('/').filter(Boolean)) {

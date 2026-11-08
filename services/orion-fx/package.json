@@ -10,6 +10,8 @@
     "test": "node --test tests/*.test.js",
     "start": "node cli/index.js",
     "demo": "node --env-file=.env cli/index.js",
-    "test:cases": "node --test --test-isolation=none tests/*.test.js"
+    "test:cases": "node --test --test-isolation=none tests/*.test.js",
+    "paper:ops:readiness": "node cli/forward-offline.js paper:ops:readiness",
+    "forward:offline": "node cli/forward-offline.js"
   }
 }

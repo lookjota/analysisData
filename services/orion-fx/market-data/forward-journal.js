@@ -1,3 +1,4 @@
+import { evidencePath } from '../security/path-policy.js';
 import { mkdir, readdir, lstat } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { canonical, hash } from '../persistence/journal.js';
@@ -12,7 +13,7 @@ const seal = body => ({...body,digest:hash(body)});
 const unseal = record => { const {digest,...body}=record; if(hash(body)!==digest) fail('JOURNAL_CORRUPTION'); return body; };
 const fields = (v, keys) => { if(!v || Object.keys(v).sort().join()!==keys.sort().join()) fail('INVALID_OBSERVATION_SCHEMA'); };
 async function location(directory) {
-  const path=resolve(directory);
+  const path=evidencePath(directory);
   if(path.split('/').some(p=>['freqtrade','.env','data','datasets','.git'].includes(p))) fail('UNSAFE_DIRECTORY');
   await safePath(path); return path;
 }
