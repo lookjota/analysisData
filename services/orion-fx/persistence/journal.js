@@ -25,6 +25,7 @@ const fields = (p, required) => {
   if (!p || Object.getPrototypeOf(p) !== Object.prototype || Object.keys(p).sort().join() !== [...required].sort().join()) throw new Error('INVALID_PAYLOAD_SCHEMA');
 };
 const schemas = {
+  STRATEGY_APPEND_CHECKPOINT: ['index','planHash','pendingIntent','cursor'],
   STRATEGY_DECLARED: ['configuration'], STRATEGY_CHECKPOINT: ['index','planHash','pendingIntent'], STRATEGY_RECOVERED: ['count'], VIRTUAL_TRAILING_UPDATED: ['stop'],
   REPLAY_DECLARED: ['configuration'], REPLAY_INPUT: ['input'],
   REPLAY_OUTCOME: ['sourceId','allowed','reasonCode'],
@@ -48,7 +49,7 @@ export function projectJournalEvents(events) {
     const p = e.payload;
     if (!portfolio && e.eventType !== 'SESSION_INITIALIZED') throw new Error('SESSION_NOT_INITIALIZED');
     switch (e.eventType) {
-      case 'STRATEGY_DECLARED': case 'STRATEGY_CHECKPOINT': case 'STRATEGY_RECOVERED':
+      case 'STRATEGY_APPEND_CHECKPOINT': case 'STRATEGY_DECLARED': case 'STRATEGY_CHECKPOINT': case 'STRATEGY_RECOVERED':
       case 'REPLAY_DECLARED': case 'REPLAY_INPUT': case 'REPLAY_OUTCOME': break;
       case 'VIRTUAL_TRAILING_UPDATED': portfolio.updateTrailingStop(p.stop); break;
       case 'REPLAY_RISK_TRANSITION':
@@ -107,7 +108,7 @@ export async function openJournal(directory, filename = 'orion.sqlite') {
     events: session => structuredClone(read(session)),
     // Planner executes under the writer lock; financial projection precedes inserts.
     // No externally visible candidate state is returned until COMMIT succeeds.
-    appendPlanned(session, planner) {
+    appendPlanned(session, planner, { beforeCommit = () => {} } = {}) {
       return transaction(() => {
         const events = read(session);
         const additions = planner(structuredClone(events), projectJournalEvents(events));
@@ -119,6 +120,7 @@ export async function openJournal(directory, filename = 'orion.sqlite') {
         });
         const snapshot = projectJournalEvents([...events, ...additions]);
         for (const e of additions) db.prepare('INSERT INTO events VALUES(?,?,?,?,?)').run(session,e.sequence,e.eventId,canonical(e),hash(e));
+        beforeCommit();
         return { idempotent: additions.length === 0, snapshot };
       });
     },

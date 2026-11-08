@@ -1,3 +1,6 @@
+import { appendableCommitments } from './appendable-commitments.js';
+import { inspectForwardJournal } from '../market-data/forward-journal.js';
+import { semanticIdentity } from './semantic-identity.js';
 import { openJournal, canonical, hash, projectJournalEvents } from '../persistence/journal.js';
 import { backtest } from '../backtesting/index.js';
 import { createStrategy } from '../strategies/research.js';
@@ -8,12 +11,22 @@ const origin = '1970-01-01T00:00:00.000Z';
 const clean = value => JSON.parse(JSON.stringify(value));
 const sameRows = (a,b) => a.length === b.length && a.every((row,i) => canonical(row) === canonical(b[i]));
 /** Bounded offline reference implementation. Reuses backtest and its USD8 ledger. */
-export async function openStrategyReplay({ directory, filename = 'strategy.sqlite', sessionId, rows, options = {}, create = false }) {
+export async function openStrategyReplay({ directory, filename = 'strategy.sqlite', sessionId, rows, options = {}, create = false, appendable = null, faultInjector = () => {} }) {
   if (typeof sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) throw new Error('INVALID_SESSION');
   const allowed = ['strategyId','parameters','initialCapital','costs','risk','trailingDistance','intrabarPolicy','marginModel','dataValidation','provenance','executionMode','costSchedule'];
   if (Object.keys(options).some(k => !allowed.includes(k))) throw new Error('INVALID_STRATEGY_REPLAY_OPTIONS');
   // Freeze a local copy; caller mutations cannot alter a live session's identity.
   options = JSON.parse(canonical(options));
+  let source = null;
+  if (appendable) {
+    source = await inspectForwardJournal(directory, appendable.clock);
+    if (canonical(options.dataValidation?.calendar ?? null)!==canonical(source.config.calendar)) throw new Error('JOURNAL_CALENDAR_MISMATCH');
+    if (source.quarantinedSequences.length) throw new Error('QUARANTINED_REVISION_BLOCKS_PROCESSING');
+    if (!sameRows(rows, source.accepted.map(r=>r.candle))) throw new Error('UNVERIFIED_JOURNAL_INPUT');
+    if (options.costSchedule || options.provenance) throw new Error('APPENDABLE_FIXED_INPUT_OPTION');
+  }
+  const commitments = source ? appendableCommitments(source) : null;
+  const checkpointType = source ? 'STRATEGY_APPEND_CHECKPOINT' : 'STRATEGY_CHECKPOINT';
   const validation = { ...options.dataValidation, calendarMode:options.dataValidation?.calendarMode ?? 'calendar-v1', gapPolicy:'reject', maxRows:1000, sort:false, strict:true };
   if (validation.calendarMode !== 'calendar-v1' || validation.calendar === null) throw new Error('DURABLE_CALENDAR_REQUIRED');
   const data = validateDataset(rows,validation);
@@ -27,19 +40,28 @@ export async function openStrategyReplay({ directory, filename = 'strategy.sqlit
   const reference = count => backtest(candles.slice(0,count), { ...base, costSchedule:base.costSchedule?.slice(0,count) ?? null }, { durableTrace:true });
   // Validate all configuration before creating a journal. The strategy sees only prefixes.
   const initial = reference(1);
-  const configuration = clean({ version:'strategy-candle-v1',sessionId,datasetIdentity:data.contentHash,calendarIdentity:hash(validation),strategy:initial.strategy,config:initial.config,options });
+  let configuration = clean({ version:'strategy-candle-v1',sessionId,datasetIdentity:data.contentHash,calendarIdentity:hash(validation),strategy:initial.strategy,config:initial.config,options });
+  if (source) {
+    const {asOf, ...policy} = validation;
+    const {dataValidation, ...stableOptions} = options;
+    configuration = clean({version:'strategy-appendable-v1', sessionId, instrument:'EUR/USD', timeframe:'H1',
+      journalIdentity:commitments.journalIdentity, genesis:source.config.digest,
+      calendarIdentity:hash(policy), semanticIdentity:await semanticIdentity(), strategy:initial.strategy,
+      config:initial.config, options:stableOptions, policy, tradingEnabled:false, brokerExecution:'DISABLED'});
+  }
   const configurationHash = hash(configuration);
   const journal = await openJournal(directory,filename);
   let lifecycle = 'RECOVERING';
   const envelope = (eventType,payload,eventTimestamp,sequence,eventId) => ({sessionId,eventType,payload,eventTimestamp,sequence,eventId,schemaVersion:1});
-  const checkpoints = events => events.filter(e => e.eventType === 'STRATEGY_CHECKPOINT');
+  const checkpoints = events => events.filter(e => e.eventType === checkpointType);
   function verify(events) {
     if (events[0]?.eventType !== 'SESSION_INITIALIZED' || events[1]?.eventType !== 'STRATEGY_DECLARED' || canonical(events[1].payload.configuration) !== canonical(configuration)) throw new Error('STRATEGY_CONFIGURATION_MISMATCH');
     const points = checkpoints(events);
-    const financialEvents = events.filter(e => !['SESSION_INITIALIZED','STRATEGY_DECLARED','STRATEGY_RECOVERED','STRATEGY_CHECKPOINT'].includes(e.eventType));
+    const financialEvents = events.filter(e => !['SESSION_INITIALIZED','STRATEGY_DECLARED','STRATEGY_RECOVERED',checkpointType].includes(e.eventType));
     if (points.length > candles.length) throw new Error('STRATEGY_CHECKPOINT_CONFLICT');
     const result = points.length ? reference(points.length) : null;
     for (let i=0;i<points.length;i++) {
+      if (source && canonical(points[i].payload.cursor)!==canonical(cursor(i))) throw new Error('CURSOR_COMMITMENT_MISMATCH');
       if (points[i].payload.index !== i || points[i].payload.planHash !== hash(result.executionTrace[i]) || canonical(points[i].payload.pendingIntent) !== canonical(pending(result.executionTrace[i],i))) throw new Error('STRATEGY_CHECKPOINT_CONFLICT');
     }
     if (result) {
@@ -51,9 +73,14 @@ export async function openStrategyReplay({ directory, filename = 'strategy.sqlit
     if (!result && financialEvents.length) throw new Error('STRATEGY_TRACE_MISMATCH');
     return {points,result};
   }
+  function cursor(index) {
+    const r = commitments.records[index];
+    return {journalIdentity:configuration.journalIdentity,sequence:r.sequence,commitment:r.commitment,
+      candleIdentity:r.candleIdentity,configurationHash};
+  }
   function pending(trace,index) {
     const timestamp = candles[index].timestamp, availableAt = new Date(Date.parse(timestamp)+3600000).toISOString();
-    return {intentId:hash({configurationHash,index,signal:trace.signal}),strategyIdentity:hash(configuration.strategy),strategyVersion:strategy.version,datasetIdentity:data.contentHash,candleTimestamp:timestamp,signalTimestamp:availableAt,earliestEligibleExecutionTimestamp:availableAt,instrument:'EUR/USD',direction:trace.signal.side ?? 0,requestedSizing:{policy:'risk-assessed-at-next-observed-open',risk:configuration.config.risk},stopLoss:trace.signal.stopDistance ?? null,takeProfit:trace.signal.takeDistance ?? null,riskConfigurationIdentity:hash(configuration.config.risk),signal:trace.signal};
+    return {intentId:hash({configurationHash,index,signal:trace.signal}),strategyIdentity:hash(configuration.strategy),strategyVersion:strategy.version,datasetIdentity:source ? configuration.journalIdentity : data.contentHash,candleTimestamp:timestamp,signalTimestamp:availableAt,earliestEligibleExecutionTimestamp:availableAt,instrument:'EUR/USD',direction:trace.signal.side ?? 0,requestedSizing:{policy:'risk-assessed-at-next-observed-open',risk:configuration.config.risk},stopLoss:trace.signal.stopDistance ?? null,takeProfit:trace.signal.takeDistance ?? null,riskConfigurationIdentity:hash(configuration.config.risk),signal:trace.signal};
   }
   try {
     journal.appendPlanned(sessionId,events => {
@@ -79,19 +106,20 @@ export async function openStrategyReplay({ directory, filename = 'strategy.sqlit
         if(index===candles.length) {done=true;return [];}
         const result=reference(index+1), trace=result.executionTrace[index];
         const effects=trace.effects.map(effect => effect.eventType==='REPLAY_RISK_TRANSITION' ? {...effect,payload:{...effect.payload,configurationHash}} : effect);
-        effects.push({eventType:'STRATEGY_CHECKPOINT',payload:{index,planHash:hash(trace),pendingIntent:pending(trace,index)},eventTimestamp:trace.snapshot.timestamp});
+        effects.push({eventType:checkpointType,payload:{index,planHash:hash(trace),pendingIntent:pending(trace,index),...(source ? {cursor:cursor(index)} : {})},eventTimestamp:trace.snapshot.timestamp});
         const additions=effects.map((effect,i)=>envelope(effect.eventType,effect.payload,effect.eventTimestamp,events.length+i+1,hash({configurationHash,index,effect:i})));
         const projected=projectJournalEvents([...events,...additions]);
         if(canonical(projected.exactUsd8)!==canonical(trace.snapshot.exactUsd8) || canonical(projected.position)!==canonical(trace.snapshot.position) || projected.riskState!==trace.riskState) throw new Error('STRATEGY_RECONCILIATION_FAILED');
         return additions;
-      });
+      }, {beforeCommit:()=>faultInjector('before-commit')});
+      faultInjector('after-commit');
       return {done,...committed};
     } catch(error) {lifecycle='DEGRADED';throw error;}
   }
   return Object.freeze({
     step,
     run(limit=candles.length) {if(!Number.isSafeInteger(limit)||limit<0) throw new Error('INVALID_STEP_LIMIT');for(let i=0;i<limit;i++) if(step().done) break;return this.status();},
-    status() {const {events,points}=read();return {sessionId,configurationHash,datasetHash:data.contentHash,lifecycle,durabilityMode:'DURABLE',committedCandles:points.length,lastCommittedSequence:events.length,recoveryCount:events.filter(e=>e.eventType==='STRATEGY_RECOVERED').length,pendingIntent:points.at(-1)?.payload.pendingIntent ?? null,snapshot:projectJournalEvents(events),latestRiskEvent:events.filter(e=>e.eventType==='REPLAY_RISK_TRANSITION').at(-1) ?? null,financialReconciliation:'VERIFIED'};},
+    status() {const {events,points}=read();return {sessionId,configurationHash,datasetHash:source ? null : data.contentHash,cursor:source ? (points.at(-1)?.payload.cursor ?? {journalIdentity:configuration.journalIdentity,sequence:0,commitment:commitments.genesis,candleIdentity:null,configurationHash}) : null,lifecycle,durabilityMode:'DURABLE',committedCandles:points.length,lastCommittedSequence:events.length,recoveryCount:events.filter(e=>e.eventType==='STRATEGY_RECOVERED').length,pendingIntent:points.at(-1)?.payload.pendingIntent ?? null,snapshot:projectJournalEvents(events),latestRiskEvent:events.filter(e=>e.eventType==='REPLAY_RISK_TRANSITION').at(-1) ?? null,financialReconciliation:'VERIFIED'};},
     report() {const {events,result}=read();if(!result) throw new Error('NO_COMMITTED_CANDLES');const {executionTrace,...financial}=result;return {...financial,mode:'paper-durable-strategy',durability:this.status(),riskTransitions:events.filter(e=>e.eventType==='REPLAY_RISK_TRANSITION'),operationalWarnings:['Bounded prefix reconstruction; maximum 1000 candles','Open positions retained at end of data; no implicit liquidation','PAUSED and HALTED latch; no automatic administrative reset']};},
     close() {if(lifecycle!=='CLOSED') {journal.close();lifecycle='CLOSED';}},
   });
