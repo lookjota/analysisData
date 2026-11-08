@@ -1,3 +1,4 @@
+import { researchCommands, runResearch } from './research.js';
 import { collectionCommands, runCollection } from './collection.js';
 import { historyCommands, runHistory } from './history.js';
 import { offlineCommands, runOffline } from './offline.js';
@@ -13,6 +14,7 @@ export async function run(args = process.argv.slice(2), {
   output = line => console.log(line), errorOutput = line => console.error(line),
 } = {}) {
   const [command = 'status', count] = args;
+  if (researchCommands.includes(command)) return runResearch(args, { output, errorOutput });
   if (collectionCommands.includes(command)) return runCollection(args, { env, fetchImpl, output, errorOutput });
   if (historyCommands.includes(command)) return runHistory(args, { env, fetchImpl, output, errorOutput });
   if (offlineCommands.includes(command)) return runOffline(args, { output, errorOutput });
