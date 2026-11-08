@@ -10,7 +10,6 @@ import { marketSession } from '../calendar/forex.js';
 const HOUR = 3600000;
 const SOURCE = 'Capital.com Demo historical API';
 const calendar = { provider: 'Orion declared FX NY17 convention' };
-const validation = { calendarMode: 'calendar-v1', calendar, gapPolicy: 'reject' };
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = code => { throw new Error(code); };
 
@@ -44,8 +43,9 @@ export function parseHistoricalPrice(price) {
 
 /** Caller authenticates explicitly. Never starts strategies, retries or interpolates. */
 export async function acquireHistory(broker, { from, to, expectedAccountId, asOf = new Date().toISOString(),
-  delayMs = 200, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  calendar: selectedCalendar = calendar, delayMs = 200, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
   const period = historyRange(from, to, asOf);
+  const validation = { calendarMode: 'calendar-v1', calendar: selectedCalendar, gapPolicy: 'reject' };
   if (!Number.isInteger(delayMs) || delayMs < 100 || delayMs > 60000) fail('INVALID_RATE_LIMIT');
   // Pace all calls in this operation, including context and discovery.
   await sleep(delayMs);
@@ -59,6 +59,7 @@ export async function acquireHistory(broker, { from, to, expectedAccountId, asOf
     // Inclusive API endpoints, disjoint bar-open intervals, at most 1000 bars.
     const request = { from: new Date(start).toISOString(), to: new Date(end - HOUR).toISOString(), max: (end - start) / HOUR };
     const data = await broker.historicalCandles(instrument.epic, request);
+    if (data?.resolution !== undefined && data.resolution !== 'HOUR') fail('UNSUPPORTED_RESOLUTION');
     if (!Array.isArray(data?.prices) || data.prices.length > request.max) fail('INVALID_HISTORY_RESPONSE');
     const parsed = data.prices.map(parseHistoricalPrice);
     if (parsed.some(c => Date.parse(c.timestamp) < start || Date.parse(c.timestamp) >= end)) fail('OUTSIDE_REQUESTED_RANGE');
@@ -73,7 +74,7 @@ export async function acquireHistory(broker, { from, to, expectedAccountId, asOf
   for (let ms = Date.parse(period.start); ms < Date.parse(period.end); ms += HOUR) {
     const iso = new Date(ms).toISOString();
     if (observed.has(iso)) continue;
-    if (marketSession(iso, calendar).status === 'WEEKLY_CLOSED') closedHours++;
+    if (['WEEKLY_CLOSED', 'DECLARED_HOLIDAY', 'DECLARED_SCHEDULE_EXCEPTION'].includes(marketSession(iso, selectedCalendar).status)) closedHours++;
     else fail('MISSING_REQUESTED_CANDLE');
   }
   const manifest = datasetManifest(dataset.candles, { ...validation, acquiredAt: asOf,
@@ -93,6 +94,19 @@ export function verifyHistory(artifact, options = {}) {
   verifyManifest(body.candles, body.manifest);
   if (body.manifest.synthetic || body.candles.some(c => c.synthetic || c.source !== SOURCE || !c.quoteBars) ||
       body.acquisition?.environment !== 'demo' || body.acquisition?.priceBasis !== 'OBSERVED_BID_ASK') fail('HISTORY_PROVENANCE_MISMATCH');
+  const period = body.manifest.requestedPeriod;
+  if (!period || body.acquisition.resolution !== 'HOUR' || !/^[A-Za-z0-9_-]+$/.test(body.acquisition.epic) ||
+      body.acquisition.requestedPeriod?.start !== period.start || body.acquisition.requestedPeriod?.end !== period.end ||
+      (body.acquisition.registry && body.acquisition.registry.datasetId !== body.manifest.datasetId)) fail('HISTORY_IDENTITY_MISMATCH');
+  historyRange(period.start, period.end, body.acquisition.acquiredAt);
+  const observed = new Set(body.candles.map(c => c.timestamp));
+  if (body.candles.some(c => c.timestamp < period.start || c.timestamp >= period.end || ['high', 'low'].some(k => c.quoteBars.bid[k] > c.quoteBars.ask[k]))) fail('HISTORY_PRICE_OR_RANGE_MISMATCH');
+  for (let ms = Date.parse(period.start); ms < Date.parse(period.end); ms += HOUR) {
+    const iso = new Date(ms).toISOString();
+    if (!observed.has(iso) && !['WEEKLY_CLOSED', 'DECLARED_HOLIDAY', 'DECLARED_SCHEDULE_EXCEPTION'].includes(marketSession(iso, body.manifest.calendar).status)) fail('MISSING_REQUESTED_CANDLE');
+  }
+  // Integrity validation is never relaxed by research/import options.
+  validateDataset(body.candles, { calendar: body.manifest.calendar, ...body.manifest.validation, asOf: body.acquisition.acquiredAt });
   return { ...validateDataset(body.candles, { calendar: body.manifest.calendar, ...body.manifest.validation, ...options }), manifest: body.manifest, acquisition: body.acquisition };
 }
 
@@ -125,6 +139,10 @@ async function anchoredParent(path) {
 
 export async function saveHistory(path, artifact) {
   verifyHistory(artifact);
+  return writeAtomicJson(path, artifact);
+}
+
+export async function writeAtomicJson(path, artifact) {
   const { directory, target } = await anchoredParent(path);
   const temporary = `${target}.${randomUUID()}.tmp`;
   let file;
@@ -144,12 +162,52 @@ export async function saveHistory(path, artifact) {
 export async function importDataset(path, options = {}) {
   if (path.endsWith('.csv')) return importCsv(path, options);
   if (!path.endsWith('.json')) fail('DATASET_FORMAT_REQUIRED');
+  return verifyHistory(await readStoredJson(path), options);
+}
+
+export async function syncHistoryParent(path) {
+  const { directory } = await anchoredParent(path);
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+
+export async function readStoredJson(path) {
   const { directory, target } = await anchoredParent(path);
   let file;
   try {
     file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = await file.stat();
     if (!stat.isFile() || stat.size > 128 * 1024 * 1024) fail('FILE_SIZE_OR_TYPE');
-    return verifyHistory(JSON.parse(await file.readFile('utf8')), options);
+    return JSON.parse(await file.readFile('utf8'));
   } finally { if (file) await file.close(); await directory.close(); }
+}
+
+/** SQLite supplies a process-scoped advisory publication lock, released on crash.
+ * The catalog remains the immutable JSON files; this database stores no metadata.
+ */
+// Do not open/close another raw descriptor for an inode locked by this process:
+// POSIX record locks can be released by closing any descriptor for that inode.
+const publicationLocks = new Set();
+export async function withHistoryPublicationLock(registry, operation) {
+  const key = resolve(registry);
+  if (publicationLocks.has(key)) fail('publication database is locked');
+  publicationLocks.add(key);
+  try { return await publicationLock(registry, operation); }
+  finally { publicationLocks.delete(key); }
+}
+async function publicationLock(registry, operation) {
+  const { directory, target } = await anchoredParent(join(registry, '.publication.sqlite'));
+  let file, db;
+  try {
+    file = await open(target, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.nlink !== 1) fail('UNSAFE_LOCK_FILE');
+    // Close the creation descriptor before SQLite owns the inode's POSIX locks.
+    await file.close(); file = undefined;
+    const { DatabaseSync } = await import('node:sqlite');
+    db = new DatabaseSync(target);
+    // Zero waiting: concurrent publishers fail and can be explicitly retried.
+    db.exec('PRAGMA busy_timeout=0; BEGIN IMMEDIATE;');
+    try { return await operation(); }
+    finally { db.exec('ROLLBACK;'); }
+  } finally { if (db) db.close(); if (file) await file.close(); await directory.close(); }
 }

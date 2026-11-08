@@ -1,3 +1,4 @@
+import { collectionCommands, runCollection } from './collection.js';
 import { historyCommands, runHistory } from './history.js';
 import { offlineCommands, runOffline } from './offline.js';
 import { pathToFileURL } from 'node:url';
@@ -12,10 +13,11 @@ export async function run(args = process.argv.slice(2), {
   output = line => console.log(line), errorOutput = line => console.error(line),
 } = {}) {
   const [command = 'status', count] = args;
+  if (collectionCommands.includes(command)) return runCollection(args, { env, fetchImpl, output, errorOutput });
   if (historyCommands.includes(command)) return runHistory(args, { env, fetchImpl, output, errorOutput });
   if (offlineCommands.includes(command)) return runOffline(args, { output, errorOutput });
   if (args.includes('--help')) {
-    output('Uso: status | auth | accounts | accounts:list | discover | quote | candles [1..1000] | ' + [...historyCommands, ...offlineCommands].join(' | ') + '; comandos offline: <comando> --help');
+    output('Uso: status | auth | accounts | accounts:list | discover | quote | candles [1..1000] | ' + [...collectionCommands, ...historyCommands, ...offlineCommands].join(' | ') + '; comandos offline: <comando> --help');
     return 0;
   }
   if (!commands.includes(command) || args.length > (command === 'candles' ? 2 : 1)) {
